@@ -22,8 +22,8 @@ class Settings:
     anthropic_api_key: str = ""
 
     # ── 모델 설정 ───────────────────────────────────────
-    analyst_model: str = "claude-haiku-4-5-20241022"      # 분석 에이전트
-    special_model: str = "claude-sonnet-4-5-20241022"    # 특수 에이전트
+    analyst_model: str = "claude-haiku-4-5-20251001"      # 분석 에이전트 ($1/MTok)
+    special_model: str = "claude-sonnet-4-5-20250929"    # 특수 에이전트 ($3/MTok)
 
     # ── 트레이딩 설정 ───────────────────────────────────
     trading_pairs: list[str] = field(default_factory=lambda: ["BTC/USDT:USDT", "ETH/USDT:USDT"])
