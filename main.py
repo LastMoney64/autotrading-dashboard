@@ -115,7 +115,7 @@ async def initialize_system():
     # 토론방
     debate_room = DebateRoom(
         registry=registry,
-        bus=bus,
+        message_bus=bus,
         debate_rounds=settings.debate_rounds,
     )
 
