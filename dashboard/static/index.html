@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoTrading Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text2: #8b949e;
+  --green: #3fb950;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --yellow: #d29922;
+  --purple: #bc8cff;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  line-height: 1.5;
+}
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+/* Header */
+header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 24px;
+}
+header h1 { font-size: 20px; }
+header h1 span { color: var(--blue); }
+.status-dot { width:8px; height:8px; border-radius:50%; background:var(--green); display:inline-block; margin-right:8px; }
+.header-right { color: var(--text2); font-size: 13px; }
+
+/* Stats cards */
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px; margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px;
+}
+.stat-card .label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+.stat-card .sub { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.positive { color: var(--green); }
+.negative { color: var(--red); }
+
+/* Sections */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+.grid-full { margin-bottom: 24px; }
+@media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+.panel {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+}
+.panel-header {
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 14px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.panel-body { padding: 16px; }
+
+/* Agent table */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px 12px; color: var(--text2); font-weight: 500; border-bottom: 1px solid var(--border); }
+td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+tr:hover { background: rgba(88,166,255,0.05); }
+.grade { font-weight: 700; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+.grade-S { background: #1f6feb33; color: var(--blue); }
+.grade-A { background: #3fb95033; color: var(--green); }
+.grade-B { background: #d2992233; color: var(--yellow); }
+.grade-C { background: #8b949e33; color: var(--text2); }
+.grade-D { background: #f8514933; color: var(--red); }
+.grade-F { background: #f8514966; color: var(--red); }
+.grade-N { background: #30363d; color: var(--text2); }
+.status-badge { font-size: 11px; padding: 2px 6px; border-radius: 3px; }
+.status-active { background: #3fb95022; color: var(--green); }
+.status-isolated { background: #f8514922; color: var(--red); }
+.status-probation { background: #d2992222; color: var(--yellow); }
+
+/* Weight bar */
+.weight-bar-bg { width: 80px; height: 6px; background: var(--border); border-radius: 3px; display: inline-block; vertical-align: middle; }
+.weight-bar { height: 100%; border-radius: 3px; background: var(--blue); }
+
+/* Chart */
+.chart-container { position: relative; height: 250px; }
+
+/* Trade list */
+.trade-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 0; border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.trade-item:last-child { border-bottom: none; }
+.trade-signal { font-weight: 700; width: 50px; }
+.trade-pnl { font-weight: 600; min-width: 80px; text-align: right; }
+
+/* Debate */
+.debate-msg {
+  padding: 10px 12px; margin-bottom: 8px;
+  border-radius: 6px; background: rgba(48,54,61,0.5);
+  font-size: 13px;
+}
+.debate-msg .agent-name { font-weight: 600; color: var(--blue); margin-bottom: 2px; font-size: 12px; }
+.debate-msg .signal-tag { font-size: 11px; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
+.signal-BUY { background: #3fb95033; color: var(--green); }
+.signal-SELL { background: #f8514933; color: var(--red); }
+.signal-HOLD { background: #8b949e33; color: var(--text2); }
+
+/* Evolution log */
+.evo-item { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.evo-item:last-child { border-bottom: none; }
+.evo-date { color: var(--text2); font-size: 11px; }
+.evo-arrow { color: var(--yellow); }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; }
+.tab {
+  padding: 4px 12px; border-radius: 4px; cursor: pointer;
+  font-size: 12px; color: var(--text2); background: transparent;
+  border: 1px solid transparent;
+}
+.tab.active { background: var(--border); color: var(--text); border-color: var(--border); }
+
+/* Loading */
+.loading { text-align: center; padding: 40px; color: var(--text2); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- Header -->
+<header>
+  <h1><span class="status-dot" id="statusDot"></span>Auto<span>Trading</span> Dashboard</h1>
+  <div class="header-right">
+    <span id="tradingPair">BTC/USDT</span> &middot;
+    <span id="lastUpdate">-</span>
+  </div>
+</header>
+
+<!-- Stats -->
+<div class="stats-grid" id="statsGrid">
+  <div class="stat-card"><div class="label">Cumulative PnL</div><div class="value" id="totalPnl">-</div><div class="sub" id="avgPnl">-</div></div>
+  <div class="stat-card"><div class="label">Win Rate</div><div class="value" id="winRate">-</div><div class="sub" id="winLoss">-</div></div>
+  <div class="stat-card"><div class="label">Total Trades</div><div class="value" id="totalTrades">-</div><div class="sub" id="bestWorst">-</div></div>
+  <div class="stat-card"><div class="label">Active Agents</div><div class="value" id="activeAgents">-</div><div class="sub" id="agentSub">-</div></div>
+</div>
+
+<!-- Chart + Recent trades -->
+<div class="grid-2">
+  <div class="panel">
+    <div class="panel-header">PnL Chart</div>
+    <div class="panel-body"><div class="chart-container"><canvas id="pnlChart"></canvas></div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">Recent Trades</div>
+    <div class="panel-body" id="tradesList"><div class="loading">Loading...</div></div>
+  </div>
+</div>
+
+<!-- Agents table -->
+<div class="grid-full">
+  <div class="panel">
+    <div class="panel-header">
+      Agent Performance
+      <div class="tabs">
+        <div class="tab active" onclick="filterAgents('all',this)">All</div>
+        <div class="tab" onclick="filterAgents('active',this)">Active</div>
+        <div class="tab" onclick="filterAgents('isolated',this)">Isolated</div>
+      </div>
+    </div>
+    <div class="panel-body" style="padding:0;">
+      <table>
+        <thead><tr>
+          <th>Agent</th><th>Grade</th><th>Status</th>
+          <th>Win Rate</th><th>Recent</th><th>Weight</th>
+          <th>Trades</th><th>Streak</th><th>Action</th>
+        </tr></thead>
+        <tbody id="agentsBody"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Debate + Evolution -->
+<div class="grid-2">
+  <div class="panel">
+    <div class="panel-header">Latest Debate</div>
+    <div class="panel-body" id="debatePanel"><div class="loading">Loading...</div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">Evolution History</div>
+    <div class="panel-body" id="evolutionPanel"><div class="loading">Loading...</div></div>
+  </div>
+</div>
+
+</div>
+
+<script>
+// ── Config ─────────────────────────────────────────
+const API = '';
+let pnlChart = null;
+let allAgents = [];
+const REFRESH_MS = 10000;
+
+// ── Init ───────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  initChart();
+  fetchAll();
+  setInterval(fetchAll, REFRESH_MS);
+  connectWS();
+});
+
+function fetchAll() {
+  fetchOverview();
+  fetchAgents();
+  fetchTrades();
+  fetchChart();
+  fetchDebate();
+  fetchEvolution();
+  document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+}
+
+// ── Overview ───────────────────────────────────────
+async function fetchOverview() {
+  try {
+    const d = await (await fetch(`${API}/api/overview`)).json();
+    document.getElementById('tradingPair').textContent = d.trading_pair;
+
+    const pnl = document.getElementById('totalPnl');
+    pnl.textContent = `${d.total_pnl >= 0 ? '+' : ''}${d.total_pnl}%`;
+    pnl.className = `value ${d.total_pnl >= 0 ? 'positive' : 'negative'}`;
+    document.getElementById('avgPnl').textContent = `avg ${d.avg_pnl}% per trade`;
+
+    document.getElementById('winRate').textContent = `${(d.win_rate * 100).toFixed(0)}%`;
+    document.getElementById('winLoss').textContent = `${d.wins}W / ${d.losses}L`;
+    document.getElementById('totalTrades').textContent = d.total_trades;
+    document.getElementById('bestWorst').textContent = `best ${d.best_trade}% / worst ${d.worst_trade}%`;
+    document.getElementById('activeAgents').textContent = `${d.active_agents}/${d.total_agents}`;
+    document.getElementById('agentSub').textContent = `${d.isolated_agents} isolated, ${d.probation_agents} probation`;
+  } catch(e) { console.error('overview', e); }
+}
+
+// ── Agents ─────────────────────────────────────────
+async function fetchAgents() {
+  try {
+    allAgents = await (await fetch(`${API}/api/agents`)).json();
+    renderAgents(allAgents);
+  } catch(e) { console.error('agents', e); }
+}
+
+function renderAgents(agents) {
+  const tbody = document.getElementById('agentsBody');
+  if (!agents.length) { tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2)">No data</td></tr>'; return; }
+
+  tbody.innerHTML = agents.map(a => {
+    const wr = (a.win_rate * 100).toFixed(0);
+    const rwr = (a.recent_win_rate * 100).toFixed(0);
+    const wPct = Math.min(a.weight / 3 * 100, 100);
+    return `<tr data-status="${a.status}">
+      <td><strong>${a.name}</strong><br><span style="color:var(--text2);font-size:11px">${a.agent_id}</span></td>
+      <td><span class="grade grade-${a.grade}">${a.grade}</span></td>
+      <td><span class="status-badge status-${a.status}">${a.status}</span></td>
+      <td>${wr}%</td>
+      <td>${rwr}%</td>
+      <td>
+        <div class="weight-bar-bg"><div class="weight-bar" style="width:${wPct}%"></div></div>
+        <span style="font-size:11px;margin-left:4px">${a.weight.toFixed(2)}</span>
+      </td>
+      <td>${a.total_trades}</td>
+      <td>${a.losing_streak > 0 ? `<span class="negative">${a.losing_streak}</span>` : '0'}</td>
+      <td><span style="font-size:11px;color:var(--text2)">${a.recommendation}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function filterAgents(status, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  if (status === 'all') renderAgents(allAgents);
+  else renderAgents(allAgents.filter(a => a.status === status));
+}
+
+// ── Trades ─────────────────────────────────────────
+async function fetchTrades() {
+  try {
+    const trades = await (await fetch(`${API}/api/trades?limit=15`)).json();
+    const el = document.getElementById('tradesList');
+    if (!trades.length) { el.innerHTML = '<div style="color:var(--text2);text-align:center">No trades yet</div>'; return; }
+
+    el.innerHTML = trades.map(t => {
+      const signalClass = t.signal === 'BUY' ? 'positive' : t.signal === 'SELL' ? 'negative' : '';
+      const pnl = t.pnl_pct != null ? `${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%` : t.final_action;
+      const pnlClass = t.pnl_pct != null ? (t.pnl_pct >= 0 ? 'positive' : 'negative') : '';
+      const conf = t.confidence ? `${(t.confidence * 100).toFixed(0)}%` : '-';
+      const price = t.entry_price ? `$${t.entry_price.toLocaleString()}` : '-';
+      return `<div class="trade-item">
+        <span class="trade-signal ${signalClass}">${t.signal || '-'}</span>
+        <span>${price}</span>
+        <span style="color:var(--text2)">${conf}</span>
+        <span class="trade-pnl ${pnlClass}">${pnl}</span>
+      </div>`;
+    }).join('');
+  } catch(e) { console.error('trades', e); }
+}
+
+// ── Chart ──────────────────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('pnlChart').getContext('2d');
+  pnlChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+      label: 'Cumulative PnL %',
+      data: [],
+      borderColor: '#58a6ff',
+      backgroundColor: 'rgba(88,166,255,0.1)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 0,
+      borderWidth: 2,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { display: true, grid: { color: '#30363d' }, ticks: { color: '#8b949e', font: { size: 10 }, maxTicksLimit: 8 }},
+        y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e', callback: v => v + '%' }}
+      },
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+async function fetchChart() {
+  try {
+    const data = await (await fetch(`${API}/api/trades/chart`)).json();
+    if (!data.length) return;
+    pnlChart.data.labels = data.map(d => d.date ? d.date.slice(5,16) : '');
+    pnlChart.data.datasets[0].data = data.map(d => d.cumulative);
+    pnlChart.update('none');
+  } catch(e) { console.error('chart', e); }
+}
+
+// ── Debate ─────────────────────────────────────────
+async function fetchDebate() {
+  try {
+    const d = await (await fetch(`${API}/api/debates/latest`)).json();
+    const el = document.getElementById('debatePanel');
+    if (!d.analyses || !d.analyses.length) { el.innerHTML = '<div style="color:var(--text2)">No debates yet</div>'; return; }
+
+    let html = '';
+
+    // Analyses
+    d.analyses.forEach(a => {
+      html += `<div class="debate-msg">
+        <div class="agent-name">${a.agent_id} <span class="signal-tag signal-${a.signal}">${a.signal}</span>
+          <span style="color:var(--text2);font-size:11px;margin-left:4px">${(a.confidence * 100).toFixed(0)}%</span>
+        </div>
+        <div style="color:var(--text2)">${(a.reasoning || '').slice(0, 150)}</div>
+      </div>`;
+    });
+
+    // Moderator summary
+    if (d.moderator_summary) {
+      html += `<div class="debate-msg" style="border-left:3px solid var(--purple);margin-top:12px">
+        <div class="agent-name" style="color:var(--purple)">Moderator Summary</div>
+        <div style="color:var(--text2)">${d.moderator_summary.slice(0, 300)}</div>
+      </div>`;
+    }
+
+    // Judgment
+    if (d.judgment) {
+      const j = d.judgment;
+      html += `<div class="debate-msg" style="border-left:3px solid var(--blue);margin-top:12px">
+        <div class="agent-name" style="color:var(--blue)">Judge Decision
+          <span class="signal-tag signal-${j.signal}">${j.signal}</span>
+        </div>
+        <div style="color:var(--text2)">${(j.reasoning || '').slice(0, 200)}</div>
+      </div>`;
+    }
+
+    // Risk
+    if (d.risk_review) {
+      const r = d.risk_review;
+      const color = r.approved ? 'var(--green)' : 'var(--red)';
+      html += `<div class="debate-msg" style="border-left:3px solid ${color};">
+        <div class="agent-name" style="color:${color}">Risk Review: ${r.approved ? 'APPROVED' : 'VETOED'}</div>
+        ${r.veto_reason ? `<div style="color:var(--text2)">${r.veto_reason}</div>` : ''}
+      </div>`;
+    }
+
+    el.innerHTML = html;
+  } catch(e) { console.error('debate', e); }
+}
+
+// ── Evolution ──────────────────────────────────────
+async function fetchEvolution() {
+  try {
+    const data = await (await fetch(`${API}/api/evolution/history?limit=20`)).json();
+    const el = document.getElementById('evolutionPanel');
+    if (!data.length) { el.innerHTML = '<div style="color:var(--text2)">No evolution history yet</div>'; return; }
+
+    el.innerHTML = data.map(e => {
+      const delta = e.new_weight - e.old_weight;
+      const arrow = delta > 0 ? '&#9650;' : '&#9660;';
+      const color = delta > 0 ? 'var(--green)' : 'var(--red)';
+      return `<div class="evo-item">
+        <span class="evo-date">${(e.created_at || '').slice(0, 16)}</span>
+        <strong style="margin-left:8px">${e.agent_id}</strong>
+        <span style="color:${color};margin-left:8px">${e.old_weight.toFixed(2)} <span class="evo-arrow">${arrow}</span> ${e.new_weight.toFixed(2)}</span>
+        <span style="color:var(--text2);margin-left:8px;font-size:12px">${e.reason || ''}</span>
+      </div>`;
+    }).join('');
+  } catch(e) { console.error('evolution', e); }
+}
+
+// ── WebSocket ──────────────────────────────────────
+function connectWS() {
+  try {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/ws/live`);
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'trade' || msg.type === 'evolution') fetchAll();
+    };
+    ws.onclose = () => setTimeout(connectWS, 3000);
+    ws.onerror = () => {};
+  } catch(e) {}
+}
+</script>
+</body>
+</html>

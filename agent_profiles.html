@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Trading Team — Agent Profiles</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Noto Sans KR', sans-serif;
+    background: #0a0a0f;
+    color: #e0e0e0;
+    min-height: 100vh;
+  }
+
+  /* ── 헤더 ─────────────────────────── */
+  .header {
+    text-align: center;
+    padding: 60px 20px 40px;
+    background: linear-gradient(180deg, #0f1923 0%, #0a0a0f 100%);
+    border-bottom: 1px solid rgba(0, 212, 255, 0.1);
+  }
+
+  .header h1 {
+    font-size: 42px;
+    font-weight: 900;
+    background: linear-gradient(135deg, #00d4ff, #7b2dff, #ff2d7b);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+    letter-spacing: -1px;
+  }
+
+  .header .subtitle {
+    font-size: 16px;
+    color: #8892a4;
+    font-weight: 300;
+  }
+
+  .header .agent-count {
+    display: inline-block;
+    margin-top: 20px;
+    padding: 8px 24px;
+    background: rgba(0, 212, 255, 0.08);
+    border: 1px solid rgba(0, 212, 255, 0.2);
+    border-radius: 100px;
+    font-size: 14px;
+    color: #00d4ff;
+  }
+
+  /* ── 섹션 ─────────────────────────── */
+  .section {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 40px 20px;
+  }
+
+  .section-title {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .section-subtitle {
+    font-size: 14px;
+    color: #6b7280;
+    margin-bottom: 32px;
+  }
+
+  .badge {
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: 100px;
+    font-weight: 500;
+  }
+
+  .badge-analyst { background: rgba(0, 212, 255, 0.15); color: #00d4ff; }
+  .badge-special { background: rgba(123, 45, 255, 0.15); color: #a78bfa; }
+
+  /* ── 카드 그리드 ───────────────────── */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    gap: 20px;
+  }
+
+  /* ── 에이전트 카드 ─────────────────── */
+  .agent-card {
+    background: linear-gradient(145deg, #12141c 0%, #0d0f15 100%);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 16px;
+    padding: 28px;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .agent-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .agent-card:hover {
+    border-color: rgba(255, 255, 255, 0.12);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+
+  /* 카드별 컬러 테마 */
+  .card-trend::before { background: linear-gradient(90deg, #00d4ff, #0099cc); }
+  .card-momentum::before { background: linear-gradient(90deg, #ff6b35, #ff4500); }
+  .card-volatility::before { background: linear-gradient(90deg, #ffd700, #ff8c00); }
+  .card-volume::before { background: linear-gradient(90deg, #00ff88, #00cc6a); }
+  .card-macro::before { background: linear-gradient(90deg, #ff2d7b, #e91e63); }
+  .card-pattern::before { background: linear-gradient(90deg, #a78bfa, #7c3aed); }
+  .card-whale::before { background: linear-gradient(90deg, #1e90ff, #4169e1); }
+  .card-copytrade::before { background: linear-gradient(90deg, #ff69b4, #ff1493); }
+  .card-onchain::before { background: linear-gradient(90deg, #32cd32, #228b22); }
+  .card-moderator::before { background: linear-gradient(90deg, #ddd6fe, #a78bfa); }
+  .card-judge::before { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+  .card-risk::before { background: linear-gradient(90deg, #ef4444, #dc2626); }
+  .card-memory::before { background: linear-gradient(90deg, #06b6d4, #0891b2); }
+  .card-evolution::before { background: linear-gradient(90deg, #10b981, #059669); }
+  .card-recruiter::before { background: linear-gradient(90deg, #f472b6, #ec4899); }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+
+  .agent-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    flex-shrink: 0;
+  }
+
+  .card-trend .agent-icon { background: rgba(0, 212, 255, 0.12); }
+  .card-momentum .agent-icon { background: rgba(255, 107, 53, 0.12); }
+  .card-volatility .agent-icon { background: rgba(255, 215, 0, 0.12); }
+  .card-volume .agent-icon { background: rgba(0, 255, 136, 0.12); }
+  .card-macro .agent-icon { background: rgba(255, 45, 123, 0.12); }
+  .card-pattern .agent-icon { background: rgba(167, 139, 250, 0.12); }
+  .card-whale .agent-icon { background: rgba(30, 144, 255, 0.12); }
+  .card-copytrade .agent-icon { background: rgba(255, 105, 180, 0.12); }
+  .card-onchain .agent-icon { background: rgba(50, 205, 50, 0.12); }
+  .card-moderator .agent-icon { background: rgba(167, 139, 250, 0.12); }
+  .card-judge .agent-icon { background: rgba(251, 191, 36, 0.12); }
+  .card-risk .agent-icon { background: rgba(239, 68, 68, 0.12); }
+  .card-memory .agent-icon { background: rgba(6, 182, 212, 0.12); }
+  .card-evolution .agent-icon { background: rgba(16, 185, 129, 0.12); }
+  .card-recruiter .agent-icon { background: rgba(244, 114, 182, 0.12); }
+
+  .card-info h3 {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .card-info .role-tag {
+    font-size: 12px;
+    color: #6b7280;
+    font-weight: 400;
+  }
+
+  .card-desc {
+    font-size: 14px;
+    line-height: 1.7;
+    color: #9ca3af;
+    margin-bottom: 20px;
+    min-height: 48px;
+  }
+
+  .card-desc strong {
+    color: #e0e0e0;
+    font-weight: 500;
+  }
+
+  /* ── 지표 태그 ─────────────────────── */
+  .indicator-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 16px;
+  }
+
+  .tag {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #9ca3af;
+    font-weight: 400;
+  }
+
+  /* ── 핵심 신호 ─────────────────────── */
+  .key-signals {
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 10px;
+    padding: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.04);
+  }
+
+  .key-signals h4 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #6b7280;
+    margin-bottom: 10px;
+  }
+
+  .signal-item {
+    font-size: 12px;
+    color: #9ca3af;
+    padding: 4px 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    line-height: 1.5;
+  }
+
+  .signal-icon-bull { color: #22c55e; }
+  .signal-icon-bear { color: #ef4444; }
+
+  .model-tag {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #6b7280;
+  }
+
+  /* ── 플로우 차트 ───────────────────── */
+  .flow-section {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 40px 20px 60px;
+  }
+
+  .flow-chart {
+    background: linear-gradient(145deg, #12141c 0%, #0d0f15 100%);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 16px;
+    padding: 40px;
+    text-align: center;
+  }
+
+  .flow-chart h3 {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 32px;
+    color: #e0e0e0;
+  }
+
+  .flow-steps {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .flow-step {
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .flow-arrow {
+    color: #4b5563;
+    font-size: 20px;
+  }
+
+  .step-data { background: rgba(0, 212, 255, 0.1); color: #00d4ff; border: 1px solid rgba(0, 212, 255, 0.2); }
+  .step-analyze { background: rgba(167, 139, 250, 0.1); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.2); }
+  .step-debate { background: rgba(251, 191, 36, 0.1); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
+  .step-judge { background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.2); }
+  .step-risk { background: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); }
+  .step-execute { background: rgba(255, 255, 255, 0.1); color: #e0e0e0; border: 1px solid rgba(255, 255, 255, 0.2); }
+
+  .footer {
+    text-align: center;
+    padding: 40px 20px;
+    color: #4b5563;
+    font-size: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════ HEADER ══════════════════════════════════════ -->
+<div class="header">
+  <h1>AI Trading Agent Team</h1>
+  <div class="subtitle">Multi-Agent Autonomous Trading System</div>
+  <div class="agent-count">15 Agents — 9 Analysts + 6 Specialists</div>
+</div>
+
+<!-- ══════════════════════════════════════ 분석 에이전트 ══════════════════════════════════════ -->
+<div class="section">
+  <div class="section-title">
+    Analyst Agents <span class="badge badge-analyst">9 agents</span>
+  </div>
+  <div class="section-subtitle">시장을 9개의 독립적인 관점에서 동시 분석합니다</div>
+
+  <div class="card-grid">
+
+    <!-- TREND -->
+    <div class="agent-card card-trend">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">📈</div>
+        <div class="card-info">
+          <h3>Trend Agent</h3>
+          <div class="role-tag">추세 추종 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        시장의 <strong>큰 흐름</strong>을 읽는 에이전트.<br>
+        추세가 살아있으면 끝까지 따라가고, 추세 전환을 가장 먼저 감지합니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">EMA 20</span>
+        <span class="tag">EMA 50</span>
+        <span class="tag">EMA 200</span>
+        <span class="tag">MACD</span>
+        <span class="tag">ADX</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> EMA 20 > 50 > 200 정배열 = 강한 상승 추세</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> MACD 데드크로스 + ADX 하락 = 추세 약화</div>
+      </div>
+    </div>
+
+    <!-- MOMENTUM -->
+    <div class="agent-card card-momentum">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">⚡</div>
+        <div class="card-info">
+          <h3>Momentum Agent</h3>
+          <div class="role-tag">모멘텀 / 반전 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>과매수/과매도</strong> 구간을 포착하는 에이전트.<br>
+        남들이 공포에 떨 때 사고, 탐욕에 빠질 때 빠져나옵니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">RSI</span>
+        <span class="tag">Stochastic</span>
+        <span class="tag">CCI</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> RSI 30 이하 + 스토캐스틱 골든크로스 = 반등 임박</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> RSI 70 이상 + 다이버전스 = 하락 반전 경고</div>
+      </div>
+    </div>
+
+    <!-- VOLATILITY -->
+    <div class="agent-card card-volatility">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">🌊</div>
+        <div class="card-info">
+          <h3>Volatility Agent</h3>
+          <div class="role-tag">변동성 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>변동성 폭발</strong>을 예측하는 에이전트.<br>
+        조용한 시장이 터지기 직전, 그 순간을 노립니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">Bollinger Bands</span>
+        <span class="tag">ATR</span>
+        <span class="tag">Keltner Channel</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> BB 스퀴즈 후 상단 돌파 = 상승 변동성 폭발</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> BB 상단 이탈 + ATR 극대 = 과열 후 회귀</div>
+      </div>
+    </div>
+
+    <!-- VOLUME -->
+    <div class="agent-card card-volume">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">📊</div>
+        <div class="card-info">
+          <h3>Volume Agent</h3>
+          <div class="role-tag">거래량 / 자금 흐름 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>돈의 흐름</strong>을 추적하는 에이전트.<br>
+        가격은 거짓말해도, 거래량은 거짓말하지 않습니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">OBV</span>
+        <span class="tag">VWAP</span>
+        <span class="tag">Open Interest</span>
+        <span class="tag">Funding Rate</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> OBV 상승 + 가격 횡보 = 세력 매집 (숨은 매수)</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> 펀딩비 극단 + OI 급증 = 청산 카스케이드 위험</div>
+      </div>
+    </div>
+
+    <!-- MACRO -->
+    <div class="agent-card card-macro">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">🌍</div>
+        <div class="card-info">
+          <h3>Macro Agent</h3>
+          <div class="role-tag">거시 / 감성 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>빅 픽처</strong>를 보는 에이전트.<br>
+        연준 발언, 규제 뉴스, 시장 심리 — 차트 밖의 세계를 읽습니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">News Sentiment</span>
+        <span class="tag">Fear & Greed</span>
+        <span class="tag">Fibonacci</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> 극단적 공포 + 피보나치 61.8% 지지 = 바닥 신호</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> 규제 악재 + 극단적 탐욕 = 폭락 전조</div>
+      </div>
+    </div>
+
+    <!-- PATTERN -->
+    <div class="agent-card card-pattern">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">🔍</div>
+        <div class="card-info">
+          <h3>Pattern Agent</h3>
+          <div class="role-tag">차트 패턴 인식 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>패턴</strong>을 읽는 에이전트.<br>
+        역사는 반복된다. 차트에 새겨진 패턴에서 다음 움직임을 예측합니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">Head & Shoulders</span>
+        <span class="tag">Triangle</span>
+        <span class="tag">Support/Resistance</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> 삼각수렴 상방 이탈 + 거래량 동반 = 강한 매수</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> 헤드앤숄더 넥라인 붕괴 = 하락 전환</div>
+      </div>
+    </div>
+
+    <!-- WHALE -->
+    <div class="agent-card card-whale">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">🐋</div>
+        <div class="card-info">
+          <h3>Whale Agent</h3>
+          <div class="role-tag">고래 지갑 추적 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>큰손의 움직임</strong>을 포착하는 에이전트.<br>
+        고래가 움직이면 파도가 친다. 그 파도를 먼저 감지합니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">Whale Alert</span>
+        <span class="tag">Exchange In/Outflow</span>
+        <span class="tag">Top Holders</span>
+        <span class="tag">Arkham</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> 고래 대량 거래소 출금 = 장기 보유 전환 (매집)</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> BTC 5,000+ 거래소 입금 = 대량 매도 임박</div>
+      </div>
+    </div>
+
+    <!-- COPYTRADE -->
+    <div class="agent-card card-copytrade">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">🏆</div>
+        <div class="card-info">
+          <h3>CopyTrade Agent</h3>
+          <div class="role-tag">탑트레이더 추적 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>최고 수익률 트레이더</strong>를 따라가는 에이전트.<br>
+        Hyperliquid, Binance 리더보드 Top 10이 베팅하는 방향을 추적합니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">Hyperliquid Board</span>
+        <span class="tag">Binance Top Traders</span>
+        <span class="tag">Smart Money</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> Top 10 중 7명 동일 방향 = 강한 스마트머니 컨센서스</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> 탑트레이더 동시 포지션 청산 = 급락 경고</div>
+      </div>
+    </div>
+
+    <!-- ONCHAIN -->
+    <div class="agent-card card-onchain">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">⛓️</div>
+        <div class="card-info">
+          <h3>OnChain Agent</h3>
+          <div class="role-tag">온체인 데이터 전문가</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>블록체인의 진실</strong>을 읽는 에이전트.<br>
+        가격은 심리, 온체인은 사실. 실제 자금 흐름으로 시장을 꿰뚫습니다.
+      </div>
+      <div class="indicator-tags">
+        <span class="tag">MVRV</span>
+        <span class="tag">SOPR</span>
+        <span class="tag">NUPL</span>
+        <span class="tag">Exchange Reserve</span>
+        <span class="tag">Miner Flow</span>
+      </div>
+      <div class="key-signals">
+        <h4>핵심 신호</h4>
+        <div class="signal-item"><span class="signal-icon-bull">▲</span> MVRV < 1.0 + USDT 거래소 유입 급증 = 바닥 매수 기회</div>
+        <div class="signal-item"><span class="signal-icon-bear">▼</span> SOPR > 1 지속 + 채굴자 매도 = 이익 실현 압력</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════ 특수 에이전트 ══════════════════════════════════════ -->
+<div class="section">
+  <div class="section-title">
+    Specialist Agents <span class="badge badge-special">6 agents</span>
+  </div>
+  <div class="section-subtitle">분석 결과를 토론하고, 판단하고, 진화시키는 특수 요원들</div>
+
+  <div class="card-grid">
+
+    <!-- MODERATOR -->
+    <div class="agent-card card-moderator">
+      <span class="model-tag">Sonnet 4.6</span>
+      <div class="card-top">
+        <div class="agent-icon">🎙️</div>
+        <div class="card-info">
+          <h3>Moderator</h3>
+          <div class="role-tag">토론 사회자</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        9명의 분석가가 싸우면 <strong>이 사람이 정리</strong>합니다.<br>
+        핵심 쟁점 추출, 합의점 도출, Judge에게 요약본 전달.
+      </div>
+      <div class="key-signals">
+        <h4>역할</h4>
+        <div class="signal-item">📋 각 에이전트 의견 요약 및 정리</div>
+        <div class="signal-item">⚖️ 합의점 / 충돌점 식별</div>
+        <div class="signal-item">🎯 핵심 쟁점 추출 → Judge에게 전달</div>
+      </div>
+    </div>
+
+    <!-- JUDGE -->
+    <div class="agent-card card-judge">
+      <span class="model-tag">Sonnet 4.6</span>
+      <div class="card-top">
+        <div class="agent-icon">⚖️</div>
+        <div class="card-info">
+          <h3>Judge Agent</h3>
+          <div class="role-tag">최종 판결자</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        모든 토론을 듣고 <strong>최종 매매를 결정</strong>합니다.<br>
+        매수/매도/홀드, 포지션 크기, 손절/익절가까지.
+      </div>
+      <div class="key-signals">
+        <h4>역할</h4>
+        <div class="signal-item">🔨 최종 BUY / SELL / HOLD 결정</div>
+        <div class="signal-item">📐 포지션 크기 + 손절/익절가 설정</div>
+        <div class="signal-item">📝 결정 근거 명문화</div>
+      </div>
+    </div>
+
+    <!-- RISK -->
+    <div class="agent-card card-risk">
+      <span class="model-tag">Sonnet 4.6</span>
+      <div class="card-top">
+        <div class="agent-icon">🛡️</div>
+        <div class="card-info">
+          <h3>Risk Agent</h3>
+          <div class="role-tag">리스크 관리자 (거부권)</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>VETO 파워</strong>를 가진 마지막 수문장.<br>
+        Judge가 결정해도 위험하면 막습니다. 계좌를 지키는 최후의 보루.
+      </div>
+      <div class="key-signals">
+        <h4>거부 조건</h4>
+        <div class="signal-item"><span class="signal-icon-bear">🚫</span> 계좌 드로다운 -10% 초과</div>
+        <div class="signal-item"><span class="signal-icon-bear">🚫</span> 동방향 포지션 3개 이상</div>
+        <div class="signal-item"><span class="signal-icon-bear">🚫</span> 에이전트 평균 확신도 < 0.5</div>
+        <div class="signal-item"><span class="signal-icon-bear">🚫</span> 뉴스 이벤트 30분 이내</div>
+      </div>
+    </div>
+
+    <!-- MEMORY -->
+    <div class="agent-card card-memory">
+      <span class="model-tag">Haiku 4.5</span>
+      <div class="card-top">
+        <div class="agent-icon">🧠</div>
+        <div class="card-info">
+          <h3>Memory Agent</h3>
+          <div class="role-tag">기억 / 패턴 검색</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>과거를 기억</strong>하는 에이전트.<br>
+        "이 상황, 전에 본 적 있어." 유사한 과거 거래를 찾아 참고합니다.
+      </div>
+      <div class="key-signals">
+        <h4>역할</h4>
+        <div class="signal-item">🔍 현재와 유사한 과거 에피소드 Top 5 검색</div>
+        <div class="signal-item">📊 과거 결과 (승/패) 통계 제공</div>
+        <div class="signal-item">💡 장기 패턴 발견 및 저장</div>
+      </div>
+    </div>
+
+    <!-- EVOLUTION -->
+    <div class="agent-card card-evolution">
+      <span class="model-tag">Sonnet 4.6</span>
+      <div class="card-top">
+        <div class="agent-icon">🧬</div>
+        <div class="card-info">
+          <h3>Evolution Agent</h3>
+          <div class="role-tag">전략 진화 설계자</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        <strong>시스템을 진화</strong>시키는 에이전트.<br>
+        매주 성과를 분석하고, 전략 파라미터를 조정하여 끊임없이 발전합니다.
+      </div>
+      <div class="key-signals">
+        <h4>역할</h4>
+        <div class="signal-item">📈 에이전트별 승률 / PnL 분석</div>
+        <div class="signal-item">🔧 전략 파라미터 자동 조정</div>
+        <div class="signal-item">⚠️ 성과 저조 에이전트 격리 결정</div>
+      </div>
+    </div>
+
+    <!-- RECRUITER -->
+    <div class="agent-card card-recruiter">
+      <span class="model-tag">Sonnet 4.6</span>
+      <div class="card-top">
+        <div class="agent-icon">🎯</div>
+        <div class="card-info">
+          <h3>Recruiter Agent</h3>
+          <div class="role-tag">에이전트 영입 담당</div>
+        </div>
+      </div>
+      <div class="card-desc">
+        팀에 <strong>빈 자리</strong>가 보이면 새 에이전트를 설계합니다.<br>
+        시스템이 놓치는 패턴을 발견하면, 그걸 잡을 전문가를 만들어냅니다.
+      </div>
+      <div class="key-signals">
+        <h4>역할</h4>
+        <div class="signal-item">🔎 팀 블라인드스팟 감지</div>
+        <div class="signal-item">📝 신규 에이전트 스펙 설계</div>
+        <div class="signal-item">🧪 4주 시뮬 테스트 후 실전 편입</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════ FLOW ══════════════════════════════════════ -->
+<div class="flow-section">
+  <div class="flow-chart">
+    <h3>의사결정 플로우</h3>
+    <div class="flow-steps">
+      <div class="flow-step step-data">📡 데이터 수집</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step step-analyze">🤖 9개 에이전트 병렬 분석</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step step-debate">💬 Debate Room 토론</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step step-judge">⚖️ Judge 최종 판결</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step step-risk">🛡️ Risk 검토</div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-step step-execute">🚀 주문 실행</div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  AI Trading Agent Team v1.0 — Powered by Claude API
+</div>
+
+</body>
+</html>

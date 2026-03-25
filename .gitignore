@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+*.db
+*.sqlite3
+data/trading.db
+data/trading.db-shm
+data/trading.db-wal
+.claude/
+*.egg-info/
+dist/
+build/
