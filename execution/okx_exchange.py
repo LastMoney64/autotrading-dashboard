@@ -22,9 +22,11 @@ class OKXExchange:
         api_secret: str,
         passphrase: str,
         testnet: bool = True,
-        leverage: int = 3,
+        leverage_min: int = 10,
+        leverage_max: int = 50,
     ):
-        self.leverage = leverage
+        self.leverage_min = leverage_min
+        self.leverage_max = leverage_max
         self.testnet = testnet
 
         config = {
@@ -210,12 +212,36 @@ class OKXExchange:
 
     # ── 주문 실행 ──────────────────────────────────────
 
-    async def set_leverage(self, symbol: str, leverage: int = None):
+    def calculate_leverage(self, confidence: float, volatility: str = "normal") -> int:
+        """
+        상황에 맞는 동적 레버리지 계산
+
+        확신도 + 변동성 기반:
+        - 확신도 높음 + 변동성 낮음 → 고레버 (최대 50x)
+        - 확신도 낮음 + 변동성 높음 → 저레버 (최소 10x)
+        """
+        # 확신도 기반 베이스 레버리지 (0.6~1.0 → 10~50)
+        conf_range = max(0, min(1, (confidence - 0.6) / 0.4))  # 0~1 정규화
+        base = self.leverage_min + conf_range * (self.leverage_max - self.leverage_min)
+
+        # 변동성 보정
+        vol_multiplier = {
+            "extreme": 0.4,   # 극단적 변동 → 레버 대폭 축소
+            "high": 0.6,      # 높은 변동 → 레버 축소
+            "normal": 1.0,    # 보통
+            "low": 1.2,       # 낮은 변동 → 레버 약간 증가
+        }.get(volatility, 1.0)
+
+        leverage = int(base * vol_multiplier)
+        leverage = max(self.leverage_min, min(self.leverage_max, leverage))
+
+        return leverage
+
+    async def set_leverage(self, symbol: str, leverage: int):
         """레버리지 설정"""
-        lev = leverage or self.leverage
         try:
-            await self.exchange.set_leverage(lev, symbol)
-            logger.info(f"[{symbol}] 레버리지 {lev}x 설정 완료")
+            await self.exchange.set_leverage(leverage, symbol)
+            logger.info(f"[{symbol}] 레버리지 {leverage}x 설정 완료")
         except Exception as e:
             logger.warning(f"레버리지 설정 실패 [{symbol}]: {e}")
 
@@ -223,14 +249,15 @@ class OKXExchange:
         self,
         symbol: str,
         side: str,              # "buy" or "sell"
-        usdt_amount: float,     # 투입할 USDT 금액
+        usdt_amount: float,     # 투입할 USDT 금액 (마진)
+        leverage: int = 20,     # 동적 레버리지
         stop_loss: float = None,
         take_profit: float = None,
     ) -> Optional[dict]:
-        """포지션 오픈 (시장가)"""
+        """포지션 오픈 (시장가, 동적 레버리지)"""
         try:
-            # 레버리지 설정
-            await self.set_leverage(symbol)
+            # 동적 레버리지 설정
+            await self.set_leverage(symbol, leverage)
 
             # 현재가 조회
             ticker = await self.get_ticker(symbol)
@@ -240,7 +267,7 @@ class OKXExchange:
             price = ticker["last"]
 
             # 수량 계산: USDT 금액 × 레버리지 / 현재가
-            amount = (usdt_amount * self.leverage) / price
+            amount = (usdt_amount * leverage) / price
 
             # 마켓 최소 수량에 맞게 조정
             market = self.exchange.market(symbol)
@@ -265,7 +292,7 @@ class OKXExchange:
             logger.info(
                 f"주문 체결: {side.upper()} {symbol} "
                 f"수량={amount} 가격≈{price} "
-                f"투입=${usdt_amount} 레버리지={self.leverage}x"
+                f"투입=${usdt_amount} 레버리지={leverage}x"
             )
 
             # 손절/익절 설정
@@ -281,7 +308,7 @@ class OKXExchange:
                 "amount": amount,
                 "price": price,
                 "usdt_amount": usdt_amount,
-                "leverage": self.leverage,
+                "leverage": leverage,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
                 "status": order["status"],

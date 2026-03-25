@@ -145,7 +145,8 @@ async def initialize_system():
             api_secret=settings.okx_api_secret,
             passphrase=settings.okx_passphrase,
             testnet=settings.exchange_testnet,
-            leverage=settings.leverage,
+            leverage_min=settings.leverage_min,
+            leverage_max=settings.leverage_max,
         )
         if await okx.initialize():
             balance = await okx.get_balance()
@@ -281,10 +282,31 @@ async def main_loop(system: dict):
                         if usdt_amount >= 3:
                             side = "buy" if signal == "BUY" else "sell"
 
-                            # 고레버리지 손절/익절 (타이트하게)
+                            # 변동성 판단 (24h 변동률 기반)
+                            change_24h = abs(market_data.get("ticker", {}).get("change_24h_pct", 0) or 0)
+                            if change_24h > 8:
+                                volatility = "extreme"
+                            elif change_24h > 5:
+                                volatility = "high"
+                            elif change_24h < 2:
+                                volatility = "low"
+                            else:
+                                volatility = "normal"
+
+                            # 동적 레버리지 계산
+                            dynamic_leverage = okx.calculate_leverage(
+                                confidence=confidence,
+                                volatility=volatility,
+                            )
+
+                            # 레버리지에 따른 동적 손절/익절
                             price = market_data.get("ticker", {}).get("last", 0)
-                            sl_pct = settings.stop_loss_pct / 100  # 1.5%
-                            tp_pct = settings.take_profit_pct / 100  # 4.0%
+                            # 고레버 → 타이트, 저레버 → 넓게
+                            sl_base = settings.stop_loss_pct / 100
+                            tp_base = settings.take_profit_pct / 100
+                            lev_factor = 20 / dynamic_leverage  # 20x 기준 보정
+                            sl_pct = sl_base * lev_factor
+                            tp_pct = tp_base * lev_factor
 
                             if side == "buy":
                                 stop_loss = price * (1 - sl_pct)
@@ -297,12 +319,13 @@ async def main_loop(system: dict):
                                 symbol=pair,
                                 side=side,
                                 usdt_amount=usdt_amount,
+                                leverage=dynamic_leverage,
                                 stop_loss=stop_loss,
                                 take_profit=take_profit,
                             )
 
                             if order:
-                                lev = settings.leverage
+                                lev = dynamic_leverage
                                 exposure = usdt_amount * lev
                                 logger.info(
                                     f"✅ 주문 체결: {side.upper()} {pair} "

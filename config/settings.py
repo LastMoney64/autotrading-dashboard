@@ -55,7 +55,8 @@ class Settings:
     okx_api_secret: str = ""
     okx_passphrase: str = ""
     exchange_testnet: bool = True
-    leverage: int = 20                       # 기본 레버리지 (10~50x)
+    leverage_min: int = 10                    # 최소 레버리지
+    leverage_max: int = 50                    # 최대 레버리지
     initial_capital: float = 100.0           # 초기 자본 ($)
 
     # ── 텔레그램 ────────────────────────────────────────
@@ -76,7 +77,8 @@ class Settings:
             okx_api_secret=os.getenv("OKX_API_SECRET", ""),
             okx_passphrase=os.getenv("OKX_PASSPHRASE", ""),
             exchange_testnet=os.getenv("EXCHANGE_TESTNET", "true").lower() == "true",
-            leverage=int(os.getenv("LEVERAGE", "20")),
+            leverage_min=int(os.getenv("LEVERAGE_MIN", "10")),
+            leverage_max=int(os.getenv("LEVERAGE_MAX", "50")),
             initial_capital=float(os.getenv("INITIAL_CAPITAL", "100")),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
