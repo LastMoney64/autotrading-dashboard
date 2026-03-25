@@ -72,7 +72,7 @@ def create_app(
             "isolated_agents": summary["isolated"],
             "probation_agents": summary["probation"],
             "total_agents": summary["total_agents"],
-            "trading_pair": settings.trading_pair,
+            "trading_pairs": settings.trading_pairs,
         }
 
     # ── API: 에이전트 ────────────────────────────────────

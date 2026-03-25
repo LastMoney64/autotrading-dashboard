@@ -88,7 +88,7 @@ async def initialize_system():
     print("=" * 60)
     print("  멀티 에이전트 자동매매 AI 시스템")
     print("=" * 60)
-    print(f"  Trading Pair: {settings.trading_pair}")
+    print(f"  Trading Pairs: {', '.join(settings.trading_pairs)}")
     print(f"  Decision Interval: {settings.decision_interval_seconds}s")
     print(f"  Max Drawdown: {settings.max_drawdown_pct}%")
     print(f"  Debate Rounds: {settings.debate_rounds}")
@@ -199,18 +199,19 @@ async def main_loop(system: dict):
                     continue
 
                 # TODO: Phase 10에서 실제 시장 데이터로 교체
-                market_data = {
-                    "symbol": settings.trading_pair,
-                    "timestamp": "live",
-                    "note": "실 데이터 연결 전 — Phase 10에서 구현",
-                }
+                for pair in settings.trading_pairs:
+                    market_data = {
+                        "symbol": pair,
+                        "timestamp": "live",
+                        "note": "실 데이터 연결 전 — Phase 10에서 구현",
+                    }
 
-                # ── 1. 의사결정 사이클 ──────────────────────
-                logger.info("--- 의사결정 사이클 시작 ---")
-                record = await debate_room.run_cycle(market_data)
+                    # ── 1. 의사결정 사이클 ──────────────────────
+                    logger.info(f"--- [{pair}] 의사결정 사이클 시작 ---")
+                    record = await debate_room.run_cycle(market_data)
 
-                # ── 2. 에피소드 저장 ────────────────────────
-                db.save_episode(record.to_dict())
+                    # ── 2. 에피소드 저장 ────────────────────────
+                    db.save_episode(record.to_dict())
 
                 for analysis in record.analyses:
                     db.save_agent_performance(

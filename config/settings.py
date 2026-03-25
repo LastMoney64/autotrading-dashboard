@@ -26,14 +26,14 @@ class Settings:
     special_model: str = "claude-sonnet-4-6-20250819"    # 특수 에이전트
 
     # ── 트레이딩 설정 ───────────────────────────────────
-    trading_pair: str = "BTC/USDT"
+    trading_pairs: list[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT"])
     timeframes: list[str] = field(default_factory=lambda: ["15m", "1h", "4h"])
     decision_interval_seconds: int = 60  # 의사결정 주기
 
     # ── 리스크 관리 ─────────────────────────────────────
     max_position_risk_pct: float = 2.0       # 거래당 최대 리스크 %
     max_drawdown_pct: float = 15.0           # 최대 드로다운 %
-    max_concurrent_positions: int = 3        # 최대 동시 포지션
+    max_concurrent_positions: int = 6        # 최대 동시 포지션 (페어당 3개)
     min_risk_reward_ratio: float = 2.0       # 최소 손익비
 
     # ── 에이전트 설정 ───────────────────────────────────
@@ -67,7 +67,7 @@ class Settings:
         """환경변수에서 설정 로드"""
         return cls(
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
-            trading_pair=os.getenv("TRADING_PAIR", "BTC/USDT"),
+            trading_pairs=[p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(",")],
             exchange_name=os.getenv("EXCHANGE_NAME", ""),
             exchange_api_key=os.getenv("EXCHANGE_API_KEY", ""),
             exchange_api_secret=os.getenv("EXCHANGE_API_SECRET", ""),
