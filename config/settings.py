@@ -22,11 +22,11 @@ class Settings:
     anthropic_api_key: str = ""
 
     # ── 모델 설정 ───────────────────────────────────────
-    analyst_model: str = "claude-haiku-4-5-20251001"     # 분석 에이전트
-    special_model: str = "claude-sonnet-4-6-20250819"    # 특수 에이전트
+    analyst_model: str = "claude-haiku-4-5-20241022"      # 분석 에이전트
+    special_model: str = "claude-sonnet-4-5-20241022"    # 특수 에이전트
 
     # ── 트레이딩 설정 ───────────────────────────────────
-    trading_pairs: list[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT"])
+    trading_pairs: list[str] = field(default_factory=lambda: ["BTC/USDT:USDT", "ETH/USDT:USDT"])
     timeframes: list[str] = field(default_factory=lambda: ["15m", "1h", "4h"])
     decision_interval_seconds: int = 60  # 의사결정 주기
 
@@ -72,7 +72,7 @@ class Settings:
         """환경변수에서 설정 로드"""
         return cls(
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
-            trading_pairs=[p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(",")],
+            trading_pairs=[p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT:USDT,ETH/USDT:USDT").split(",") if p.strip()],
             okx_api_key=os.getenv("OKX_API_KEY", ""),
             okx_api_secret=os.getenv("OKX_API_SECRET", ""),
             okx_passphrase=os.getenv("OKX_PASSPHRASE", ""),

@@ -9,8 +9,8 @@ from core.base_agent import AgentConfig, AgentRole
 
 # ── 분석 에이전트 설정 ──────────────────────────────────
 
-_ANALYST_MODEL = "claude-haiku-4-5-20251001"
-_SPECIAL_MODEL = "claude-sonnet-4-6-20250819"
+_ANALYST_MODEL = "claude-haiku-4-5-20241022"
+_SPECIAL_MODEL = "claude-sonnet-4-5-20241022"
 
 AGENT_CONFIGS: dict[str, AgentConfig] = {
     # ── 분석 에이전트 ────────────────────────────────────
