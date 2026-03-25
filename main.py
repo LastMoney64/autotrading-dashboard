@@ -27,6 +27,7 @@ from evolution.performance_tracker import PerformanceTracker
 from monitoring.telegram_monitor import TelegramMonitor
 from dashboard.app import create_app
 from execution.okx_exchange import OKXExchange
+from data.signal_filter import SignalFilter
 
 # ── 에이전트 임포트 ──────────────────────────────────────
 from agents.analysts.trend_agent import TrendAgent
@@ -137,6 +138,9 @@ async def initialize_system():
         tracker=tracker,
     )
 
+    # 사전 필터링 엔진 (무료 — AI 호출 전 게이트키퍼)
+    signal_filter = SignalFilter()
+
     # OKX 거래소
     okx = None
     if settings.okx_api_key:
@@ -178,6 +182,7 @@ async def initialize_system():
         "telegram": telegram,
         "dashboard_app": dashboard_app,
         "okx": okx,
+        "signal_filter": signal_filter,
     }
 
 
@@ -190,8 +195,11 @@ async def main_loop(system: dict):
     db = system["db"]
     telegram = system["telegram"]
     okx = system["okx"]
+    signal_filter = system["signal_filter"]
 
     trades_since_evolution = 0
+    scan_count = 0
+    trigger_count = 0
     paused = False
 
     # pause/resume 콜백
@@ -209,39 +217,70 @@ async def main_loop(system: dict):
     polling_task = asyncio.create_task(telegram.start_polling())
 
     # 시작 알림
-    await telegram.send("🚀 <b>자동매매 시스템 시작</b>\n\n<code>!help</code>로 명령어 확인")
+    await telegram.send(
+        "🚀 <b>자동매매 시스템 시작</b>\n\n"
+        "📊 2단계 구조: 지표 스캔(무료) → AI 토론(유료)\n"
+        "<code>!help</code>로 명령어 확인"
+    )
 
-    logger.info("메인 루프 시작")
+    logger.info("메인 루프 시작 (2단계: 지표 스캔 → AI 토론)")
 
     try:
         while True:
             try:
-                # 일시 중지 상태
                 if paused:
                     await asyncio.sleep(2)
                     continue
 
                 for pair in settings.trading_pairs:
-                    # ── 0. 시장 데이터 수집 ───────────────────
-                    if okx:
-                        logger.info(f"[{pair}] OKX 시장 데이터 수집 중...")
-                        market_data = await okx.get_market_data(
-                            pair, settings.timeframes
-                        )
-                    else:
-                        market_data = {
-                            "symbol": pair,
-                            "timestamp": "mock",
-                            "note": "OKX 미연결 — Mock 모드",
-                        }
+                    # ═══════════════════════════════════════════
+                    # STAGE 1: 지표 스캔 (무료 — 매 60초)
+                    # ═══════════════════════════════════════════
+                    scan_count += 1
 
-                    # ── 1. 의사결정 사이클 ──────────────────────
-                    logger.info(f"--- [{pair}] 의사결정 사이클 시작 ---")
+                    if not okx:
+                        logger.debug(f"[{pair}] OKX 미연결 — 스킵")
+                        continue
+
+                    # 캔들 데이터만 가져오기 (가벼운 API 호출)
+                    candles_1h = await okx.get_candles(pair, "1h", 100)
+                    candles_15m = await okx.get_candles(pair, "15m", 100)
+
+                    if not candles_1h:
+                        logger.warning(f"[{pair}] 캔들 데이터 없음")
+                        continue
+
+                    # 지표 기반 필터링 (코드로 계산 — 무료)
+                    filter_result = signal_filter.check(pair, candles_1h, candles_15m)
+
+                    if not filter_result["should_trigger"]:
+                        # 신호 없음 → AI 호출 안 함 → 비용 $0
+                        if scan_count % 30 == 0:  # 30분마다 상태 로그
+                            logger.info(
+                                f"[{pair}] 스캔 #{scan_count} — "
+                                f"신호 {filter_result['signal_count']}개 (임계값 미달) | "
+                                f"AI 트리거: {trigger_count}회"
+                            )
+                        continue
+
+                    # ═══════════════════════════════════════════
+                    # STAGE 2: AI 토론 (유료 — 신호 감지 시만)
+                    # ═══════════════════════════════════════════
+                    trigger_count += 1
+                    logger.info(
+                        f"🔔 [{pair}] AI 토론 발동! (스캔 #{scan_count}, "
+                        f"트리거 #{trigger_count}) | {filter_result['reason']}"
+                    )
+
+                    # 전체 시장 데이터 수집 (AI에게 전달)
+                    market_data = await okx.get_market_data(pair, settings.timeframes)
+                    market_data["pre_filter"] = filter_result
+
+                    # AI 에이전트 토론
                     record = await debate_room.run_cycle(market_data)
 
-                    # ── 2. 에피소드 저장 ────────────────────────
+                    # 에피소드 저장
                     db.save_episode(record.to_dict())
-
                     for analysis in record.analyses:
                         db.save_agent_performance(
                             agent_id=analysis.agent_id,
@@ -250,25 +289,20 @@ async def main_loop(system: dict):
                             confidence=analysis.confidence,
                             reasoning=analysis.reasoning[:500],
                         )
-
                     trades_since_evolution += 1
 
-                    # ── 3. 실제 주문 실행 ──────────────────────
+                    # ── 주문 실행 ──────────────────────────────
                     if (
-                        okx
-                        and record.final_action == "EXECUTED"
+                        record.final_action == "EXECUTED"
                         and record.judgment
                         and record.risk_review
                         and record.risk_review.approved
                     ):
-                        signal = record.judgment.signal.value  # BUY / SELL
+                        signal = record.judgment.signal.value
                         confidence = record.judgment.confidence
                         balance = await okx.get_balance()
 
-                        # 확신도 기반 포지션 사이징 (고레버리지 전략)
-                        # 확신도 0.6~0.7: 잔고의 5~10% 투입
-                        # 확신도 0.7~0.85: 잔고의 10~20% 투입
-                        # 확신도 0.85+: 잔고의 20~30% 투입
+                        # 확신도 기반 포지션 사이징
                         if confidence >= 0.85:
                             position_pct = min(30, 20 + (confidence - 0.85) * 100)
                         elif confidence >= 0.7:
@@ -278,11 +312,10 @@ async def main_loop(system: dict):
 
                         usdt_amount = balance["free"] * (position_pct / 100)
 
-                        # 최소 $3 이상만 주문 ($100 계좌 고려)
                         if usdt_amount >= 3:
                             side = "buy" if signal == "BUY" else "sell"
 
-                            # 변동성 판단 (24h 변동률 기반)
+                            # 변동성 판단
                             change_24h = abs(market_data.get("ticker", {}).get("change_24h_pct", 0) or 0)
                             if change_24h > 8:
                                 volatility = "extreme"
@@ -293,18 +326,14 @@ async def main_loop(system: dict):
                             else:
                                 volatility = "normal"
 
-                            # 동적 레버리지 계산
-                            dynamic_leverage = okx.calculate_leverage(
-                                confidence=confidence,
-                                volatility=volatility,
-                            )
+                            # 동적 레버리지
+                            dynamic_leverage = okx.calculate_leverage(confidence, volatility)
 
-                            # 레버리지에 따른 동적 손절/익절
+                            # 동적 손절/익절
                             price = market_data.get("ticker", {}).get("last", 0)
-                            # 고레버 → 타이트, 저레버 → 넓게
                             sl_base = settings.stop_loss_pct / 100
                             tp_base = settings.take_profit_pct / 100
-                            lev_factor = 20 / dynamic_leverage  # 20x 기준 보정
+                            lev_factor = 20 / dynamic_leverage
                             sl_pct = sl_base * lev_factor
                             tp_pct = tp_base * lev_factor
 
@@ -325,46 +354,22 @@ async def main_loop(system: dict):
                             )
 
                             if order:
-                                lev = dynamic_leverage
-                                exposure = usdt_amount * lev
+                                exposure = usdt_amount * dynamic_leverage
                                 logger.info(
                                     f"✅ 주문 체결: {side.upper()} {pair} "
                                     f"마진=${usdt_amount:.2f} 노출=${exposure:.2f} "
-                                    f"레버리지={lev}x @ {price}"
+                                    f"레버리지={dynamic_leverage}x @ {price}"
                                 )
                                 await telegram.notify_trade_open({
                                     **record.to_dict(),
                                     "order": order,
-                                    "leverage": lev,
+                                    "leverage": dynamic_leverage,
                                     "exposure": exposure,
                                 })
                         else:
                             logger.info(f"주문 금액 부족: ${usdt_amount:.2f} < $3")
 
-                    elif record.final_action == "EXECUTED" and record.judgment:
-                        # OKX 미연결 시 알림만
-                        await telegram.notify_trade_open(record.to_dict())
-
-                    # ── 4. 진화 사이클 체크 ─────────────────────
-                    if evolver.should_run(trades_since_evolution):
-                        logger.info("=== 진화 사이클 트리거 ===")
-                        evo_result = await evolver.run_evolution_cycle()
-                        await telegram.notify_evolution(evo_result)
-
-                        changes = evo_result.get("weight_changes", [])
-                        isolations = evo_result.get("isolations", [])
-                        reactivations = evo_result.get("reactivations", [])
-
-                        if changes:
-                            logger.info(f"가중치 변경 {len(changes)}건")
-                        if isolations:
-                            logger.warning(f"에이전트 격리: {[i['name'] for i in isolations]}")
-                        if reactivations:
-                            logger.info(f"에이전트 복귀: {[r['name'] for r in reactivations]}")
-
-                        trades_since_evolution = 0
-
-                    # ── 5. 결과 출력 ────────────────────────────
+                    # 결과 출력
                     if record.judgment:
                         logger.info(
                             f"판결: {record.judgment.signal.value} "
@@ -374,8 +379,14 @@ async def main_loop(system: dict):
                     if record.risk_review:
                         status = "승인" if record.risk_review.approved else f"거부: {record.risk_review.veto_reason}"
                         logger.info(f"리스크: {status}")
-
                     logger.info(f"최종: {record.final_action}")
+
+                    # 진화 체크
+                    if evolver.should_run(trades_since_evolution):
+                        logger.info("=== 진화 사이클 트리거 ===")
+                        evo_result = await evolver.run_evolution_cycle()
+                        await telegram.notify_evolution(evo_result)
+                        trades_since_evolution = 0
 
                 await asyncio.sleep(settings.decision_interval_seconds)
 
