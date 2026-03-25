@@ -26,6 +26,7 @@ from evolution.strategy_evolver import StrategyEvolver
 from evolution.performance_tracker import PerformanceTracker
 from monitoring.telegram_monitor import TelegramMonitor
 from dashboard.app import create_app
+from execution.okx_exchange import OKXExchange
 
 # ── 에이전트 임포트 ──────────────────────────────────────
 from agents.analysts.trend_agent import TrendAgent
@@ -136,6 +137,25 @@ async def initialize_system():
         tracker=tracker,
     )
 
+    # OKX 거래소
+    okx = None
+    if settings.okx_api_key:
+        okx = OKXExchange(
+            api_key=settings.okx_api_key,
+            api_secret=settings.okx_api_secret,
+            passphrase=settings.okx_passphrase,
+            testnet=settings.exchange_testnet,
+            leverage=settings.leverage,
+        )
+        if await okx.initialize():
+            balance = await okx.get_balance()
+            print(f"  OKX 연결 성공! 잔고: ${balance['total']:.2f}")
+        else:
+            print("  ⚠️ OKX 연결 실패 — Mock 모드로 전환")
+            okx = None
+    else:
+        print("  OKX API 키 미설정 — Mock 모드")
+
     # 대시보드
     dashboard_app = create_app(
         registry=registry,
@@ -156,6 +176,7 @@ async def initialize_system():
         "evolver": evolver,
         "telegram": telegram,
         "dashboard_app": dashboard_app,
+        "okx": okx,
     }
 
 
@@ -167,6 +188,7 @@ async def main_loop(system: dict):
     evolver = system["evolver"]
     db = system["db"]
     telegram = system["telegram"]
+    okx = system["okx"]
 
     trades_since_evolution = 0
     paused = False
@@ -198,13 +220,19 @@ async def main_loop(system: dict):
                     await asyncio.sleep(2)
                     continue
 
-                # TODO: Phase 10에서 실제 시장 데이터로 교체
                 for pair in settings.trading_pairs:
-                    market_data = {
-                        "symbol": pair,
-                        "timestamp": "live",
-                        "note": "실 데이터 연결 전 — Phase 10에서 구현",
-                    }
+                    # ── 0. 시장 데이터 수집 ───────────────────
+                    if okx:
+                        logger.info(f"[{pair}] OKX 시장 데이터 수집 중...")
+                        market_data = await okx.get_market_data(
+                            pair, settings.timeframes
+                        )
+                    else:
+                        market_data = {
+                            "symbol": pair,
+                            "timestamp": "mock",
+                            "note": "OKX 미연결 — Mock 모드",
+                        }
 
                     # ── 1. 의사결정 사이클 ──────────────────────
                     logger.info(f"--- [{pair}] 의사결정 사이클 시작 ---")
@@ -213,54 +241,99 @@ async def main_loop(system: dict):
                     # ── 2. 에피소드 저장 ────────────────────────
                     db.save_episode(record.to_dict())
 
-                for analysis in record.analyses:
-                    db.save_agent_performance(
-                        agent_id=analysis.agent_id,
-                        cycle_id=record.cycle_id,
-                        signal=analysis.signal.value,
-                        confidence=analysis.confidence,
-                        reasoning=analysis.reasoning[:500],
-                    )
+                    for analysis in record.analyses:
+                        db.save_agent_performance(
+                            agent_id=analysis.agent_id,
+                            cycle_id=record.cycle_id,
+                            signal=analysis.signal.value,
+                            confidence=analysis.confidence,
+                            reasoning=analysis.reasoning[:500],
+                        )
 
-                trades_since_evolution += 1
+                    trades_since_evolution += 1
 
-                # ── 3. 텔레그램 매매 알림 ───────────────────
-                if record.final_action == "EXECUTED" and record.judgment:
-                    await telegram.notify_trade_open(record.to_dict())
+                    # ── 3. 실제 주문 실행 ──────────────────────
+                    if (
+                        okx
+                        and record.final_action == "EXECUTED"
+                        and record.judgment
+                        and record.risk_review
+                        and record.risk_review.approved
+                    ):
+                        signal = record.judgment.signal.value  # BUY / SELL
+                        position_pct = record.judgment.position_size_pct
+                        balance = await okx.get_balance()
+                        usdt_amount = balance["free"] * (position_pct / 100)
 
-                # ── 4. 진화 사이클 체크 ─────────────────────
-                if evolver.should_run(trades_since_evolution):
-                    logger.info("=== 진화 사이클 트리거 ===")
-                    evo_result = await evolver.run_evolution_cycle()
+                        # 최소 $5 이상만 주문
+                        if usdt_amount >= 5:
+                            side = "buy" if signal == "BUY" else "sell"
 
-                    # 텔레그램 진화 알림
-                    await telegram.notify_evolution(evo_result)
+                            # 손절/익절 계산
+                            price = market_data.get("ticker", {}).get("last", 0)
+                            atr_pct = 0.02  # 기본 2% ATR 추정
+                            if side == "buy":
+                                stop_loss = price * (1 - atr_pct * 1.5)
+                                take_profit = price * (1 + atr_pct * 3)
+                            else:
+                                stop_loss = price * (1 + atr_pct * 1.5)
+                                take_profit = price * (1 - atr_pct * 3)
 
-                    changes = evo_result.get("weight_changes", [])
-                    isolations = evo_result.get("isolations", [])
-                    reactivations = evo_result.get("reactivations", [])
+                            order = await okx.open_position(
+                                symbol=pair,
+                                side=side,
+                                usdt_amount=usdt_amount,
+                                stop_loss=stop_loss,
+                                take_profit=take_profit,
+                            )
 
-                    if changes:
-                        logger.info(f"가중치 변경 {len(changes)}건")
-                    if isolations:
-                        logger.warning(f"에이전트 격리 {len(isolations)}건: {[i['name'] for i in isolations]}")
-                    if reactivations:
-                        logger.info(f"에이전트 복귀 {len(reactivations)}건: {[r['name'] for r in reactivations]}")
+                            if order:
+                                logger.info(
+                                    f"✅ 주문 체결: {side.upper()} {pair} "
+                                    f"${usdt_amount:.2f} @ {price}"
+                                )
+                                await telegram.notify_trade_open({
+                                    **record.to_dict(),
+                                    "order": order,
+                                })
+                        else:
+                            logger.info(f"주문 금액 부족: ${usdt_amount:.2f} < $5")
 
-                    trades_since_evolution = 0
+                    elif record.final_action == "EXECUTED" and record.judgment:
+                        # OKX 미연결 시 알림만
+                        await telegram.notify_trade_open(record.to_dict())
 
-                # ── 5. 결과 출력 ────────────────────────────
-                if record.judgment:
-                    logger.info(
-                        f"판결: {record.judgment.signal.value} "
-                        f"(확신도 {record.judgment.confidence:.0%}, "
-                        f"포지션 {record.judgment.position_size_pct:.1f}%)"
-                    )
-                if record.risk_review:
-                    status = "승인" if record.risk_review.approved else f"거부: {record.risk_review.veto_reason}"
-                    logger.info(f"리스크: {status}")
+                    # ── 4. 진화 사이클 체크 ─────────────────────
+                    if evolver.should_run(trades_since_evolution):
+                        logger.info("=== 진화 사이클 트리거 ===")
+                        evo_result = await evolver.run_evolution_cycle()
+                        await telegram.notify_evolution(evo_result)
 
-                logger.info(f"최종: {record.final_action}")
+                        changes = evo_result.get("weight_changes", [])
+                        isolations = evo_result.get("isolations", [])
+                        reactivations = evo_result.get("reactivations", [])
+
+                        if changes:
+                            logger.info(f"가중치 변경 {len(changes)}건")
+                        if isolations:
+                            logger.warning(f"에이전트 격리: {[i['name'] for i in isolations]}")
+                        if reactivations:
+                            logger.info(f"에이전트 복귀: {[r['name'] for r in reactivations]}")
+
+                        trades_since_evolution = 0
+
+                    # ── 5. 결과 출력 ────────────────────────────
+                    if record.judgment:
+                        logger.info(
+                            f"판결: {record.judgment.signal.value} "
+                            f"(확신도 {record.judgment.confidence:.0%}, "
+                            f"포지션 {record.judgment.position_size_pct:.1f}%)"
+                        )
+                    if record.risk_review:
+                        status = "승인" if record.risk_review.approved else f"거부: {record.risk_review.veto_reason}"
+                        logger.info(f"리스크: {status}")
+
+                    logger.info(f"최종: {record.final_action}")
 
                 await asyncio.sleep(settings.decision_interval_seconds)
 
@@ -275,6 +348,8 @@ async def main_loop(system: dict):
         await telegram.send("🛑 <b>자동매매 시스템 종료</b>")
         await telegram.stop_polling()
         polling_task.cancel()
+        if okx:
+            await okx.close()
         db.close()
         logger.info("시스템 종료")
 

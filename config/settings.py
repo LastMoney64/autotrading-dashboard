@@ -48,11 +48,13 @@ class Settings:
     probation_win_rate: float = 0.55         # 수습 복귀 기준 승률
     probation_min_trades: int = 30           # 수습 기간 최소 시뮬 거래
 
-    # ── 거래소 (Phase 10에서 채울 것) ───────────────────
-    exchange_name: str = ""
-    exchange_api_key: str = ""
-    exchange_api_secret: str = ""
+    # ── OKX 거래소 ──────────────────────────────────────
+    okx_api_key: str = ""
+    okx_api_secret: str = ""
+    okx_passphrase: str = ""
     exchange_testnet: bool = True
+    leverage: int = 3                        # 기본 레버리지
+    initial_capital: float = 100.0           # 초기 자본 ($)
 
     # ── 텔레그램 ────────────────────────────────────────
     telegram_bot_token: str = ""
@@ -68,10 +70,12 @@ class Settings:
         return cls(
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             trading_pairs=[p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(",")],
-            exchange_name=os.getenv("EXCHANGE_NAME", ""),
-            exchange_api_key=os.getenv("EXCHANGE_API_KEY", ""),
-            exchange_api_secret=os.getenv("EXCHANGE_API_SECRET", ""),
+            okx_api_key=os.getenv("OKX_API_KEY", ""),
+            okx_api_secret=os.getenv("OKX_API_SECRET", ""),
+            okx_passphrase=os.getenv("OKX_PASSPHRASE", ""),
             exchange_testnet=os.getenv("EXCHANGE_TESTNET", "true").lower() == "true",
+            leverage=int(os.getenv("LEVERAGE", "3")),
+            initial_capital=float(os.getenv("INITIAL_CAPITAL", "100")),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         )

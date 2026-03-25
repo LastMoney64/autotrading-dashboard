@@ -13,8 +13,8 @@ aiohttp>=3.9.0
 # Database
 aiosqlite>=0.19.0
 
-# Exchange (Phase 10)
-# ccxt>=4.0.0
+# Exchange
+ccxt>=4.0.0
 
 # Dashboard
 fastapi>=0.115.0
