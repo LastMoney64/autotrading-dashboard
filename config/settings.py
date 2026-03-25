@@ -30,11 +30,13 @@ class Settings:
     timeframes: list[str] = field(default_factory=lambda: ["15m", "1h", "4h"])
     decision_interval_seconds: int = 60  # 의사결정 주기
 
-    # ── 리스크 관리 ─────────────────────────────────────
-    max_position_risk_pct: float = 2.0       # 거래당 최대 리스크 %
-    max_drawdown_pct: float = 15.0           # 최대 드로다운 %
-    max_concurrent_positions: int = 6        # 최대 동시 포지션 (페어당 3개)
-    min_risk_reward_ratio: float = 2.0       # 최소 손익비
+    # ── 리스크 관리 (고레버리지 전략) ─────────────────────
+    max_position_risk_pct: float = 1.0       # 거래당 최대 리스크 % (고레버 → 작게)
+    max_drawdown_pct: float = 30.0           # 최대 드로다운 %
+    max_concurrent_positions: int = 4        # 최대 동시 포지션 (페어당 2개)
+    min_risk_reward_ratio: float = 2.5       # 최소 손익비 (고레버 → 높게)
+    stop_loss_pct: float = 1.5              # 손절 % (레버리지 적용 전 가격 기준)
+    take_profit_pct: float = 4.0            # 익절 % (손절의 ~2.5배)
 
     # ── 에이전트 설정 ───────────────────────────────────
     min_confidence_threshold: float = 0.6    # 최소 확신도
@@ -53,7 +55,7 @@ class Settings:
     okx_api_secret: str = ""
     okx_passphrase: str = ""
     exchange_testnet: bool = True
-    leverage: int = 3                        # 기본 레버리지
+    leverage: int = 20                       # 기본 레버리지 (10~50x)
     initial_capital: float = 100.0           # 초기 자본 ($)
 
     # ── 텔레그램 ────────────────────────────────────────
@@ -74,7 +76,7 @@ class Settings:
             okx_api_secret=os.getenv("OKX_API_SECRET", ""),
             okx_passphrase=os.getenv("OKX_PASSPHRASE", ""),
             exchange_testnet=os.getenv("EXCHANGE_TESTNET", "true").lower() == "true",
-            leverage=int(os.getenv("LEVERAGE", "3")),
+            leverage=int(os.getenv("LEVERAGE", "20")),
             initial_capital=float(os.getenv("INITIAL_CAPITAL", "100")),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),

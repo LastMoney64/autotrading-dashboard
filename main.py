@@ -261,23 +261,37 @@ async def main_loop(system: dict):
                         and record.risk_review.approved
                     ):
                         signal = record.judgment.signal.value  # BUY / SELL
-                        position_pct = record.judgment.position_size_pct
+                        confidence = record.judgment.confidence
                         balance = await okx.get_balance()
+
+                        # 확신도 기반 포지션 사이징 (고레버리지 전략)
+                        # 확신도 0.6~0.7: 잔고의 5~10% 투입
+                        # 확신도 0.7~0.85: 잔고의 10~20% 투입
+                        # 확신도 0.85+: 잔고의 20~30% 투입
+                        if confidence >= 0.85:
+                            position_pct = min(30, 20 + (confidence - 0.85) * 100)
+                        elif confidence >= 0.7:
+                            position_pct = min(20, 10 + (confidence - 0.7) * 67)
+                        else:
+                            position_pct = min(10, 5 + (confidence - 0.6) * 50)
+
                         usdt_amount = balance["free"] * (position_pct / 100)
 
-                        # 최소 $5 이상만 주문
-                        if usdt_amount >= 5:
+                        # 최소 $3 이상만 주문 ($100 계좌 고려)
+                        if usdt_amount >= 3:
                             side = "buy" if signal == "BUY" else "sell"
 
-                            # 손절/익절 계산
+                            # 고레버리지 손절/익절 (타이트하게)
                             price = market_data.get("ticker", {}).get("last", 0)
-                            atr_pct = 0.02  # 기본 2% ATR 추정
+                            sl_pct = settings.stop_loss_pct / 100  # 1.5%
+                            tp_pct = settings.take_profit_pct / 100  # 4.0%
+
                             if side == "buy":
-                                stop_loss = price * (1 - atr_pct * 1.5)
-                                take_profit = price * (1 + atr_pct * 3)
+                                stop_loss = price * (1 - sl_pct)
+                                take_profit = price * (1 + tp_pct)
                             else:
-                                stop_loss = price * (1 + atr_pct * 1.5)
-                                take_profit = price * (1 - atr_pct * 3)
+                                stop_loss = price * (1 + sl_pct)
+                                take_profit = price * (1 - tp_pct)
 
                             order = await okx.open_position(
                                 symbol=pair,
@@ -288,16 +302,21 @@ async def main_loop(system: dict):
                             )
 
                             if order:
+                                lev = settings.leverage
+                                exposure = usdt_amount * lev
                                 logger.info(
                                     f"✅ 주문 체결: {side.upper()} {pair} "
-                                    f"${usdt_amount:.2f} @ {price}"
+                                    f"마진=${usdt_amount:.2f} 노출=${exposure:.2f} "
+                                    f"레버리지={lev}x @ {price}"
                                 )
                                 await telegram.notify_trade_open({
                                     **record.to_dict(),
                                     "order": order,
+                                    "leverage": lev,
+                                    "exposure": exposure,
                                 })
                         else:
-                            logger.info(f"주문 금액 부족: ${usdt_amount:.2f} < $5")
+                            logger.info(f"주문 금액 부족: ${usdt_amount:.2f} < $3")
 
                     elif record.final_action == "EXECUTED" and record.judgment:
                         # OKX 미연결 시 알림만
