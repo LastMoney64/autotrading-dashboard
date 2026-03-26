@@ -239,6 +239,42 @@ def _check_position_exit(
     return False, ""
 
 
+def _update_agent_scores(
+    db: Database, position: dict, pnl_pct_lev: float, exit_price: float
+):
+    """
+    거래 종료 시 에이전트 정답/오답 판정 + DB 업데이트
+
+    수익 → judge_signal과 같은 신호를 낸 에이전트가 "정답"
+    손실 → judge_signal과 같은 신호를 낸 에이전트가 "오답"
+    """
+    cycle_id = position.get("cycle_id")
+    if not cycle_id:
+        return
+
+    entry = position.get("entry_price", 0)
+    judge_signal = position.get("judge_signal", "")
+
+    # 수익이면 judge_signal이 맞은 것, 손실이면 반대 방향이 맞은 것
+    if pnl_pct_lev > 0:
+        correct_signal = judge_signal  # 수익 → judge가 맞음
+    else:
+        # 손실 → 반대 방향이 정답이었음
+        correct_signal = "SELL" if judge_signal == "BUY" else "BUY"
+
+    # DB 업데이트: 에이전트별 정답/오답 기록
+    db.update_agent_correctness(cycle_id, correct_signal)
+
+    # 거래 결과 업데이트
+    pnl_usd = position.get("margin", 0) * (pnl_pct_lev / 100)
+    db.update_trade_result(cycle_id, exit_price, pnl_pct_lev, pnl_usd)
+
+    logger.info(
+        f"📊 에이전트 성과 업데이트: cycle={cycle_id} "
+        f"PnL={pnl_pct_lev:+.2f}% 정답={correct_signal}"
+    )
+
+
 async def main_loop(system: dict):
     """메인 트레이딩 루프"""
     settings = system["settings"]
@@ -296,30 +332,59 @@ async def main_loop(system: dict):
                         current_positions = await okx.get_positions()
                         current_symbols = {p["symbol"] for p in current_positions}
 
-                        # 사라진 포지션 감지 (수동 청산)
+                        # 사라진 포지션 감지 (수동 청산 또는 SL/TP 체결)
                         for sym, pos in list(known_positions.items()):
                             if sym not in current_symbols:
-                                # 피드백 기록 (수동 청산)
+                                # 현재가 조회해서 PnL 추정
+                                try:
+                                    ticker = await okx.get_ticker(sym)
+                                    exit_price = ticker.get("last", 0) if ticker else 0
+                                except Exception:
+                                    exit_price = 0
+
+                                entry = pos.get("entry_price", 0)
+                                lev = pos.get("leverage", 1)
+                                if entry and exit_price:
+                                    if pos.get("side") in ("buy", "long"):
+                                        pnl_pct = (exit_price - entry) / entry * 100
+                                    else:
+                                        pnl_pct = (entry - exit_price) / entry * 100
+                                    pnl_pct_lev = pnl_pct * lev
+                                else:
+                                    pnl_pct = 0
+                                    pnl_pct_lev = 0
+
+                                # 피드백 기록
                                 feedback.record_trade({
                                     "symbol": sym,
                                     "side": pos.get("side", "?"),
-                                    "entry_price": pos.get("entry_price", 0),
-                                    "exit_price": 0,  # 알 수 없음
-                                    "pnl_pct_leveraged": 0,
-                                    "leverage": pos.get("leverage", 1),
-                                    "exit_reason": "manual",
+                                    "entry_price": entry,
+                                    "exit_price": exit_price,
+                                    "pnl_pct": pnl_pct,
+                                    "pnl_pct_leveraged": pnl_pct_lev,
+                                    "leverage": lev,
+                                    "margin": pos.get("margin", 0),
+                                    "exit_reason": "manual_or_sltp",
                                     "entry_signals": pos.get("entry_signals", []),
                                     "entry_confidence": pos.get("entry_confidence", 0),
                                 })
+
+                                # ★ 에이전트 정답/오답 판정
+                                _update_agent_scores(db, pos, pnl_pct_lev, exit_price)
+
+                                emoji = "💰" if pnl_pct_lev > 0 else "💸"
                                 await telegram.send(
-                                    f"👋 <b>포지션 수동 청산 감지</b>\n\n"
+                                    f"{emoji} <b>포지션 청산 감지</b>\n\n"
                                     f"<b>심볼:</b> {sym}\n"
                                     f"<b>방향:</b> {pos.get('side', '?')}\n"
-                                    f"<b>진입가:</b> ${pos.get('entry_price', 0):,.2f}\n"
-                                    f"<b>마진:</b> ${pos.get('margin', 0):.2f}\n\n"
-                                    f"<i>수동 청산 — 추적 동기화 완료</i>"
+                                    f"<b>진입:</b> ${entry:,.2f}\n"
+                                    f"<b>청산:</b> ${exit_price:,.2f}\n"
+                                    f"<b>PnL:</b> {pnl_pct_lev:+.2f}%\n"
+                                    f"<b>누적:</b> {feedback.stats['total_trades']}거래 "
+                                    f"승률 {feedback.win_rate:.0%}"
                                 )
                                 del known_positions[sym]
+                                trades_since_evolution += 1
 
                         # 새 포지션 업데이트
                         for pos in current_positions:
@@ -391,6 +456,11 @@ async def main_loop(system: dict):
                                     "entry_confidence": pos.get("entry_confidence", 0),
                                 })
 
+                                # ★ 에이전트 정답/오답 판정 + DB 업데이트
+                                _update_agent_scores(
+                                    db, pos, pnl_pct_lev, current
+                                )
+
                                 emoji = "💰" if pnl_pct_lev > 0 else "💸"
                                 await telegram.send(
                                     f"{emoji} <b>능동 청산</b>\n\n"
@@ -398,7 +468,7 @@ async def main_loop(system: dict):
                                     f"<b>방향:</b> {pos.get('side', '?')}\n"
                                     f"<b>사유:</b> {close_reason}\n"
                                     f"<b>PnL:</b> {pnl_pct_lev:+.2f}%\n"
-                                    f"<b>교훈:</b> {fb['lesson'][:150]}\n"
+                                    f"<b>교훈:</b> {fb.get('lesson', 'N/A')[:150]}\n"
                                     f"<b>누적:</b> {feedback.stats['total_trades']}거래 "
                                     f"승률 {feedback.win_rate:.0%}"
                                 )
@@ -441,7 +511,6 @@ async def main_loop(system: dict):
                             confidence=analysis.confidence,
                             reasoning=analysis.reasoning[:500],
                         )
-                    trades_since_evolution += 1
 
                     # ── 주문 실행 ──────────────────────────────
                     if (
@@ -527,7 +596,7 @@ async def main_loop(system: dict):
 
                             if order:
                                 exposure = usdt_amount * dynamic_leverage
-                                # 포지션 추적에 추가 (피드백용 진입 조건 포함)
+                                # 포지션 추적에 추가 (피드백용 진입 조건 + cycle_id)
                                 known_positions[pair] = {
                                     "symbol": pair,
                                     "side": side,
@@ -537,6 +606,8 @@ async def main_loop(system: dict):
                                     "entry_signals": filter_result.get("signals", []),
                                     "entry_confidence": confidence,
                                     "entry_time": datetime.utcnow().isoformat(),
+                                    "cycle_id": record.cycle_id,
+                                    "judge_signal": signal,
                                 }
                                 logger.info(
                                     f"✅ 주문 체결: {side.upper()} {pair} "
