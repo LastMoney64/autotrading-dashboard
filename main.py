@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -28,6 +29,7 @@ from monitoring.telegram_monitor import TelegramMonitor
 from dashboard.app import create_app
 from execution.okx_exchange import OKXExchange
 from data.signal_filter import SignalFilter
+from evolution.trade_feedback import TradeFeedback
 
 # ── 에이전트 임포트 ──────────────────────────────────────
 from agents.analysts.trend_agent import TrendAgent
@@ -183,6 +185,7 @@ async def initialize_system():
         "dashboard_app": dashboard_app,
         "okx": okx,
         "signal_filter": signal_filter,
+        "feedback": TradeFeedback(db),
     }
 
 
@@ -246,6 +249,7 @@ async def main_loop(system: dict):
     telegram = system["telegram"]
     okx = system["okx"]
     signal_filter = system["signal_filter"]
+    feedback = system["feedback"]
 
     trades_since_evolution = 0
     scan_count = 0
@@ -263,6 +267,7 @@ async def main_loop(system: dict):
         paused = False
 
     telegram.set_callbacks(on_pause=on_pause, on_resume=on_resume)
+    telegram._feedback = feedback
 
     # 텔레그램 폴링을 백그라운드로 시작
     polling_task = asyncio.create_task(telegram.start_polling())
@@ -294,16 +299,26 @@ async def main_loop(system: dict):
                         # 사라진 포지션 감지 (수동 청산)
                         for sym, pos in list(known_positions.items()):
                             if sym not in current_symbols:
-                                pnl_text = f"진입가 ${pos.get('entry_price', 0):,.2f}"
+                                # 피드백 기록 (수동 청산)
+                                feedback.record_trade({
+                                    "symbol": sym,
+                                    "side": pos.get("side", "?"),
+                                    "entry_price": pos.get("entry_price", 0),
+                                    "exit_price": 0,  # 알 수 없음
+                                    "pnl_pct_leveraged": 0,
+                                    "leverage": pos.get("leverage", 1),
+                                    "exit_reason": "manual",
+                                    "entry_signals": pos.get("entry_signals", []),
+                                    "entry_confidence": pos.get("entry_confidence", 0),
+                                })
                                 await telegram.send(
                                     f"👋 <b>포지션 수동 청산 감지</b>\n\n"
                                     f"<b>심볼:</b> {sym}\n"
                                     f"<b>방향:</b> {pos.get('side', '?')}\n"
-                                    f"<b>{pnl_text}</b>\n"
+                                    f"<b>진입가:</b> ${pos.get('entry_price', 0):,.2f}\n"
                                     f"<b>마진:</b> ${pos.get('margin', 0):.2f}\n\n"
-                                    f"<i>봇 외부에서 청산됨 — 포지션 추적 동기화 완료</i>"
+                                    f"<i>수동 청산 — 추적 동기화 완료</i>"
                                 )
-                                logger.info(f"👋 [{sym}] 수동 청산 감지 — 포지션 추적에서 제거")
                                 del known_positions[sym]
 
                         # 새 포지션 업데이트
@@ -361,16 +376,34 @@ async def main_loop(system: dict):
                                 else:
                                     pnl_pct_lev = 0
 
+                                # 피드백 기록
+                                fb = feedback.record_trade({
+                                    "symbol": pair,
+                                    "side": pos.get("side", "?"),
+                                    "entry_price": entry,
+                                    "exit_price": current,
+                                    "pnl_pct": pnl_pct if entry else 0,
+                                    "pnl_pct_leveraged": pnl_pct_lev,
+                                    "leverage": lev,
+                                    "margin": pos.get("margin", 0),
+                                    "exit_reason": "active_exit",
+                                    "entry_signals": pos.get("entry_signals", []),
+                                    "entry_confidence": pos.get("entry_confidence", 0),
+                                })
+
                                 emoji = "💰" if pnl_pct_lev > 0 else "💸"
                                 await telegram.send(
                                     f"{emoji} <b>능동 청산</b>\n\n"
                                     f"<b>심볼:</b> {pair}\n"
                                     f"<b>방향:</b> {pos.get('side', '?')}\n"
                                     f"<b>사유:</b> {close_reason}\n"
-                                    f"<b>예상 PnL:</b> {pnl_pct_lev:+.2f}%\n"
+                                    f"<b>PnL:</b> {pnl_pct_lev:+.2f}%\n"
+                                    f"<b>교훈:</b> {fb['lesson'][:150]}\n"
+                                    f"<b>누적:</b> {feedback.stats['total_trades']}거래 "
+                                    f"승률 {feedback.win_rate:.0%}"
                                 )
                                 del known_positions[pair]
-                                logger.info(f"✅ [{pair}] 능동 청산 완료: {close_reason}")
+                                trades_since_evolution += 1
 
                     if not filter_result["should_trigger"]:
                         # 신호 없음 → AI 호출 안 함 → 비용 $0
@@ -431,6 +464,13 @@ async def main_loop(system: dict):
                         else:
                             position_pct = 15  # 약한 신호 (최소)
 
+                        # 피드백 기반 포지션 조정 (연패 시 축소)
+                        fb_adj = feedback.get_adjustments()
+                        position_multiplier = fb_adj.get("position_size_multiplier", 1.0)
+                        position_pct *= position_multiplier
+                        if position_multiplier < 1:
+                            logger.info(f"⚠️ 피드백 조정: 포지션 {position_multiplier:.0%} ({fb_adj.get('reason', '')})")
+
                         usdt_amount = max(0, balance["free"] * (position_pct / 100))
 
                         if usdt_amount >= 3:
@@ -476,13 +516,16 @@ async def main_loop(system: dict):
 
                             if order:
                                 exposure = usdt_amount * dynamic_leverage
-                                # 포지션 추적에 추가
+                                # 포지션 추적에 추가 (피드백용 진입 조건 포함)
                                 known_positions[pair] = {
                                     "symbol": pair,
                                     "side": side,
                                     "entry_price": price,
                                     "margin": usdt_amount,
                                     "leverage": dynamic_leverage,
+                                    "entry_signals": filter_result.get("signals", []),
+                                    "entry_confidence": confidence,
+                                    "entry_time": datetime.utcnow().isoformat(),
                                 }
                                 logger.info(
                                     f"✅ 주문 체결: {side.upper()} {pair} "

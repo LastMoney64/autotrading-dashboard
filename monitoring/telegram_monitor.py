@@ -52,11 +52,13 @@ class TelegramMonitor:
             "!pause": self._cmd_pause,
             "!resume": self._cmd_resume,
             "!help": self._cmd_help,
+            "!report": self._cmd_report,
         }
 
-        # 외부 콜백 (pause/resume 시 메인 루프에 알려줌)
+        # 외부 콜백
         self._on_pause: Optional[Callable] = None
         self._on_resume: Optional[Callable] = None
+        self._feedback = None  # TradeFeedback 인스턴스 (외부 주입)
 
     @property
     def is_configured(self) -> bool:
@@ -358,11 +360,19 @@ class TelegramMonitor:
 <code>!performance</code> — 성과 리포트
 <code>!weights</code> — 에이전트 가중치
 <code>!evolution</code> — 진화 엔진 상태
+<code>!report</code> — 트레이딩 성과 리포트
 <code>!pause</code> — 시스템 일시 중지
 <code>!resume</code> — 시스템 재개
 <code>!help</code> — 이 메시지"""
 
         await self.send(text)
+
+    async def _cmd_report(self, _: str):
+        """트레이딩 성과 리포트"""
+        if self._feedback:
+            await self.send(self._feedback.get_telegram_report())
+        else:
+            await self.send("📊 아직 거래 데이터가 없습니다.")
 
     # ── 일간/주간 리포트 ───────────────────────────────────
 
