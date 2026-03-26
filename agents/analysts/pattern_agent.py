@@ -1,113 +1,101 @@
 """
-Pattern Agent — 차트 패턴 인식 전문 분석 에이전트
+Pattern Agent — 차트 패턴 인식 (코드 기반, 비용 $0)
 
-지지/저항, 캔들 패턴, 클래식 차트 패턴을 식별.
-패턴 확인은 거래량 동반이 필요.
+지지/저항, 캔들 패턴, 가격 구조 분석.
 """
 
-import json
-from core.base_agent import BaseAgent, AgentConfig, AnalysisResult, Signal
+from core.base_agent import BaseAgent, AnalysisResult
 from data.indicators import IndicatorEngine
+from agents.analysts.rule_based_mixin import RuleBasedAnalyst
 
 
 class PatternAgent(BaseAgent):
 
-    INDICATORS = ["support_levels", "resistance_levels", "ema_20", "ema_50", "volume_24h"]
+    INDICATORS = ["current_price", "ema_20", "ema_50"]
 
     def get_system_prompt(self) -> str:
         return self.config.system_prompt
 
     async def analyze(self, market_data: dict) -> AnalysisResult:
         candles_1h = market_data.get("candles", {}).get("1h")
-        candles_4h = market_data.get("candles", {}).get("4h")
+        ind = IndicatorEngine.compute_for_agent(candles_1h, self.INDICATORS) if candles_1h is not None else {}
 
-        ind_1h = IndicatorEngine.compute_for_agent(candles_1h, self.INDICATORS) if candles_1h is not None else {}
-        sr_1h = IndicatorEngine.support_resistance(candles_1h) if candles_1h is not None else {}
-        sr_4h = IndicatorEngine.support_resistance(candles_4h) if candles_4h is not None else {}
+        buy_score = 0.0
+        sell_score = 0.0
+        reasons = []
 
-        # 최근 캔들 패턴 데이터 (마지막 10개)
-        recent_candles = []
-        if candles_1h is not None and len(candles_1h) >= 10:
-            for _, row in candles_1h.tail(10).iterrows():
-                recent_candles.append({
-                    "O": round(row["open"], 2),
-                    "H": round(row["high"], 2),
-                    "L": round(row["low"], 2),
-                    "C": round(row["close"], 2),
-                    "V": round(row["volume"], 0),
-                })
+        if candles_1h and len(candles_1h) >= 20:
+            import pandas as pd
+            df = pd.DataFrame(candles_1h)
 
-        prompt = f"""현재 {market_data.get('symbol', 'BTC/USDT')} 시장을 차트 패턴 관점에서 분석해주세요.
+            highs = df["high"].astype(float)
+            lows = df["low"].astype(float)
+            closes = df["close"].astype(float)
+            opens = df["open"].astype(float)
+            current = float(closes.iloc[-1])
 
-## 지지/저항 (1H)
-{json.dumps(sr_1h, indent=2, ensure_ascii=False)}
+            # 지지/저항선 (최근 20봉)
+            recent_high = float(highs.tail(20).max())
+            recent_low = float(lows.tail(20).min())
+            resistance = recent_high
+            support = recent_low
 
-## 지지/저항 (4H)
-{json.dumps(sr_4h, indent=2, ensure_ascii=False)}
+            # 지지선 근처
+            if current <= support * 1.005:
+                buy_score += 2.0
+                reasons.append(f"지지선({support:.0f}) 터치 — 반등 기대")
+            elif current >= resistance * 0.995:
+                # 저항 돌파 시도
+                if current > resistance:
+                    buy_score += 1.5
+                    reasons.append(f"저항선({resistance:.0f}) 돌파 — 상승 추세")
+                else:
+                    sell_score += 1.5
+                    reasons.append(f"저항선({resistance:.0f}) 근처 — 반락 가능")
 
-## 최근 10개 1H 캔들 (시간순)
-{json.dumps(recent_candles, indent=2, ensure_ascii=False)}
+            ind["support"] = round(support, 2)
+            ind["resistance"] = round(resistance, 2)
 
-## 추가 지표
-{json.dumps(ind_1h, indent=2, ensure_ascii=False)}
+            # 캔들 패턴 — 최근 3봉
+            if len(df) >= 3:
+                c1 = float(closes.iloc[-1])
+                o1 = float(opens.iloc[-1])
+                h1 = float(highs.iloc[-1])
+                l1 = float(lows.iloc[-1])
+                c2 = float(closes.iloc[-2])
+                o2 = float(opens.iloc[-2])
 
-## 추가 정보
-- 현재가: {market_data.get('current_price')}
+                body1 = abs(c1 - o1)
+                wick_upper1 = h1 - max(c1, o1)
+                wick_lower1 = min(c1, o1) - l1
 
-## 분석 기준
-- 헤드앤숄더 / 역헤드앤숄더 = 추세 반전
-- 이중바닥(W) / 이중천장(M) = 반전
-- 삼각수렴 (대칭/상승/하락) = 돌파 방향으로 진행
-- 쐐기형 (상승/하락) = 반대 방향 돌파
-- 가격이 주요 지지선 접근 = 매수 기회
-- 가격이 주요 저항선 접근 = 매도 기회
-- 패턴 확인에는 거래량 동반이 필수
+                # 해머 (하락 후 긴 아래꼬리)
+                if body1 > 0 and wick_lower1 > body1 * 2 and wick_upper1 < body1 * 0.5:
+                    buy_score += 1.5
+                    reasons.append("해머 캔들 — 반등 신호")
 
-## 응답 형식 (반드시 JSON)
-{{"signal": "BUY/SELL/HOLD", "confidence": 0.0~1.0, "reasoning": "분석 근거"}}"""
+                # 슈팅스타 (상승 후 긴 위꼬리)
+                if body1 > 0 and wick_upper1 > body1 * 2 and wick_lower1 < body1 * 0.5:
+                    sell_score += 1.5
+                    reasons.append("슈팅스타 캔들 — 하락 신호")
 
-        response = await self.call_llm(prompt)
-        indicators = {**ind_1h, **sr_1h, "sr_4h": sr_4h}
-        return self._parse_response(response, indicators)
+                # 강한 양봉/음봉
+                if c1 > o1 and body1 > (h1 - l1) * 0.7:
+                    buy_score += 0.5
+                    reasons.append("강한 양봉")
+                elif o1 > c1 and body1 > (h1 - l1) * 0.7:
+                    sell_score += 0.5
+                    reasons.append("강한 음봉")
 
-    async def respond_to_debate(self, own_analysis: AnalysisResult, other_analyses: list[AnalysisResult], debate_context: str) -> str:
-        others_summary = "\n".join(
-            f"- {a.agent_id}: {a.signal.value} (확신도 {a.confidence:.2f}) — {a.reasoning[:100]}"
-            for a in other_analyses
-        )
-        prompt = f"""당신의 분석: {own_analysis.signal.value} (확신도 {own_analysis.confidence:.2f})
-근거: {own_analysis.reasoning}
+                # 장악형 (Engulfing)
+                if c1 > o1 and o2 > c2 and c1 > o2 and o1 < c2:
+                    buy_score += 1.5
+                    reasons.append("상승 장악형 — 강한 매수")
+                elif o1 > c1 and c2 > o2 and o1 > c2 and c1 < o2:
+                    sell_score += 1.5
+                    reasons.append("하락 장악형 — 강한 매도")
 
-다른 에이전트들의 의견:
-{others_summary}
+        return RuleBasedAnalyst.build_result(self.agent_id, buy_score, sell_score, reasons, ind)
 
-토론 맥락:
-{debate_context}
-
-차트 패턴/지지저항 관점에서 반론하거나 동의해주세요. 간결하게 핵심만."""
-
-        return await self.call_llm(prompt)
-
-    def _parse_response(self, response: str, indicators: dict) -> AnalysisResult:
-        try:
-            text = response
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            data = json.loads(text.strip())
-            signal = Signal(data.get("signal", "HOLD").upper())
-            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
-            reasoning = data.get("reasoning", "")
-        except (json.JSONDecodeError, ValueError, KeyError):
-            signal = Signal.HOLD
-            confidence = 0.3
-            reasoning = response[:500]
-
-        return AnalysisResult(
-            agent_id=self.agent_id,
-            signal=signal,
-            confidence=confidence,
-            reasoning=reasoning,
-            key_indicators=indicators,
-        )
+    async def respond_to_debate(self, own, others, context) -> str:
+        return f"{self.agent_id}: {own.signal.value} ({own.confidence:.0%}) — {own.reasoning}"

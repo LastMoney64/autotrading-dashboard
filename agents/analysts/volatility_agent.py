@@ -1,90 +1,72 @@
 """
-Volatility Agent — 변동성 전문 분석 에이전트
+Volatility Agent — 변동성 돌파 (코드 기반, 비용 $0)
 
-볼린저밴드, ATR 기반으로 변동성 돌파/수축, 평균 회귀를 감지.
+볼린저밴드, ATR 기반으로 변동성 상태와 돌파 신호를 분석.
 """
 
-import json
-from core.base_agent import BaseAgent, AgentConfig, AnalysisResult, Signal
+from core.base_agent import BaseAgent, AnalysisResult
 from data.indicators import IndicatorEngine
+from agents.analysts.rule_based_mixin import RuleBasedAnalyst
 
 
 class VolatilityAgent(BaseAgent):
 
-    INDICATORS = ["bollinger_upper", "bollinger_mid", "bollinger_lower", "atr"]
+    INDICATORS = ["bollinger_upper", "bollinger_lower", "bollinger_mid", "atr", "current_price"]
 
     def get_system_prompt(self) -> str:
         return self.config.system_prompt
 
     async def analyze(self, market_data: dict) -> AnalysisResult:
-        candles_15m = market_data.get("candles", {}).get("15m")
         candles_1h = market_data.get("candles", {}).get("1h")
+        ind = IndicatorEngine.compute_for_agent(candles_1h, self.INDICATORS) if candles_1h is not None else {}
 
-        ind_15m = IndicatorEngine.compute_for_agent(candles_15m, self.INDICATORS) if candles_15m is not None else {}
-        ind_1h = IndicatorEngine.compute_for_agent(candles_1h, self.INDICATORS) if candles_1h is not None else {}
+        buy_score = 0.0
+        sell_score = 0.0
+        reasons = []
 
-        prompt = f"""현재 {market_data.get('symbol', 'BTC/USDT')} 시장을 변동성 관점에서 분석해주세요.
+        price = ind.get("current_price", 0)
+        bb_upper = ind.get("bollinger_upper", 0)
+        bb_lower = ind.get("bollinger_lower", 0)
+        bb_mid = ind.get("bollinger_mid", 0)
+        atr = ind.get("atr", 0)
 
-## 15M 지표
-{json.dumps(ind_15m, indent=2, ensure_ascii=False)}
+        # BB 이탈
+        if price and bb_lower and price <= bb_lower:
+            buy_score += 2.0
+            reasons.append("BB 하단 돌파 — 반등 기대")
+        elif price and bb_upper and price >= bb_upper:
+            sell_score += 2.0
+            reasons.append("BB 상단 돌파 — 과열")
 
-## 1H 지표
-{json.dumps(ind_1h, indent=2, ensure_ascii=False)}
+        # BB 스퀴즈
+        if bb_upper and bb_lower and bb_mid:
+            bb_width = (bb_upper - bb_lower) / (bb_mid + 1e-10)
+            if bb_width < 0.02:
+                reasons.append(f"BB 극단 스퀴즈(폭 {bb_width:.3f}) — 큰 움직임 임박")
+                buy_score += 0.5
+                sell_score += 0.5
+            elif bb_width > 0.08:
+                reasons.append(f"BB 확장(폭 {bb_width:.3f}) — 추세 진행 중")
 
-## 추가 정보
-- 현재가: {market_data.get('current_price')}
+        # BB 중간 기준 위치
+        if price and bb_mid and bb_upper and bb_lower:
+            bb_pct = (price - bb_lower) / (bb_upper - bb_lower + 1e-10)
+            if bb_pct < 0.2:
+                buy_score += 1.0
+                reasons.append(f"BB 하단 20% 위치")
+            elif bb_pct > 0.8:
+                sell_score += 1.0
+                reasons.append(f"BB 상단 80% 위치")
 
-## 분석 기준
-- 가격이 볼린저 하단 터치/이탈 = 과매도 반등 가능 (매수)
-- 가격이 볼린저 상단 터치/이탈 = 과매수 조정 가능 (매도)
-- 볼린저밴드 폭 축소(스퀴즈) = 큰 움직임 임박
-- ATR 급등 = 변동성 확대, 포지션 크기 축소 필요
-- 볼린저 밴드 워킹 = 강한 추세 (밴드 터치해도 반전 아님)
+        # ATR 변동성
+        if atr and price:
+            atr_pct = atr / price * 100
+            if atr_pct > 3:
+                reasons.append(f"높은 변동성(ATR {atr_pct:.1f}%)")
+            elif atr_pct < 1:
+                reasons.append(f"낮은 변동성(ATR {atr_pct:.1f}%)")
 
-## 응답 형식 (반드시 JSON)
-{{"signal": "BUY/SELL/HOLD", "confidence": 0.0~1.0, "reasoning": "분석 근거"}}"""
+        return RuleBasedAnalyst.build_result(self.agent_id, buy_score, sell_score, reasons, ind)
 
-        response = await self.call_llm(prompt)
-        return self._parse_response(response, {**ind_15m, **{f"1h_{k}": v for k, v in ind_1h.items()}})
-
-    async def respond_to_debate(self, own_analysis: AnalysisResult, other_analyses: list[AnalysisResult], debate_context: str) -> str:
-        others_summary = "\n".join(
-            f"- {a.agent_id}: {a.signal.value} (확신도 {a.confidence:.2f}) — {a.reasoning[:100]}"
-            for a in other_analyses
-        )
-        prompt = f"""당신의 분석: {own_analysis.signal.value} (확신도 {own_analysis.confidence:.2f})
-근거: {own_analysis.reasoning}
-
-다른 에이전트들의 의견:
-{others_summary}
-
-토론 맥락:
-{debate_context}
-
-변동성 관점에서 반론하거나 동의해주세요. 간결하게 핵심만."""
-
-        return await self.call_llm(prompt)
-
-    def _parse_response(self, response: str, indicators: dict) -> AnalysisResult:
-        try:
-            text = response
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            data = json.loads(text.strip())
-            signal = Signal(data.get("signal", "HOLD").upper())
-            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
-            reasoning = data.get("reasoning", "")
-        except (json.JSONDecodeError, ValueError, KeyError):
-            signal = Signal.HOLD
-            confidence = 0.3
-            reasoning = response[:500]
-
-        return AnalysisResult(
-            agent_id=self.agent_id,
-            signal=signal,
-            confidence=confidence,
-            reasoning=reasoning,
-            key_indicators=indicators,
-        )
+    async def respond_to_debate(self, own, others, context) -> str:
+        return f"{self.agent_id}: {own.signal.value} ({own.confidence:.0%}) — {own.reasoning}"

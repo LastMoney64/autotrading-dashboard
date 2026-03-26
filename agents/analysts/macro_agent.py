@@ -1,106 +1,84 @@
 """
-Macro Agent — 거시/감성 전문 분석 에이전트
+Macro Agent — 거시/감성 (코드 기반, 비용 $0)
 
-뉴스 감성, 공포탐욕지수, 피보나치 레벨 기반으로 거시적 판단.
-외부 이벤트가 기술적 분석을 압도할 수 있음을 인지.
+피보나치 되돌림, 가격 위치, 변동 추세 기반 분석.
+(뉴스/감성 데이터는 외부 API 연동 시 확장 가능)
 """
 
-import json
-from core.base_agent import BaseAgent, AgentConfig, AnalysisResult, Signal
+from core.base_agent import BaseAgent, AnalysisResult
 from data.indicators import IndicatorEngine
+from agents.analysts.rule_based_mixin import RuleBasedAnalyst
 
 
 class MacroAgent(BaseAgent):
 
-    INDICATORS = ["current_price"]
+    INDICATORS = ["current_price", "ema_200"]
 
     def get_system_prompt(self) -> str:
         return self.config.system_prompt
 
     async def analyze(self, market_data: dict) -> AnalysisResult:
-        candles_4h = market_data.get("candles", {}).get("4h")
+        candles_1h = market_data.get("candles", {}).get("1h")
+        ind = IndicatorEngine.compute_for_agent(candles_1h, self.INDICATORS) if candles_1h is not None else {}
 
-        # 피보나치 레벨 계산
-        fib_levels = {}
-        if candles_4h is not None:
-            fib_levels = IndicatorEngine.fibonacci_levels(candles_4h)
+        buy_score = 0.0
+        sell_score = 0.0
+        reasons = []
 
-        # 감성 데이터
-        sentiment = market_data.get("sentiment", {})
-        news_headlines = market_data.get("news_headlines", [])
+        if candles_1h and len(candles_1h) >= 50:
+            import pandas as pd
+            df = pd.DataFrame(candles_1h)
+            prices = df["close"].astype(float)
 
-        prompt = f"""현재 {market_data.get('symbol', 'BTC/USDT')} 시장을 거시/감성 관점에서 분석해주세요.
+            # 피보나치 되돌림 (최근 50봉 고저 기준)
+            high = float(prices.max())
+            low = float(prices.min())
+            current = float(prices.iloc[-1])
 
-## 피보나치 레벨 (4H 기준)
-{json.dumps(fib_levels, indent=2, ensure_ascii=False)}
+            if high > low:
+                fib_range = high - low
+                fib_382 = high - fib_range * 0.382
+                fib_500 = high - fib_range * 0.500
+                fib_618 = high - fib_range * 0.618
 
-## 감성 데이터
-- 공포탐욕지수: {sentiment.get('fear_greed_index', 'N/A')} ({sentiment.get('fear_greed_label', 'N/A')})
-- 뉴스 평균 감성: {sentiment.get('news_sentiment_avg', 'N/A')}
+                if current <= fib_618 * 1.01:
+                    buy_score += 2.0
+                    reasons.append(f"피보나치 61.8% 지지({fib_618:.0f}) 근처")
+                elif current <= fib_500 * 1.01:
+                    buy_score += 1.5
+                    reasons.append(f"피보나치 50% 지지({fib_500:.0f}) 근처")
+                elif current <= fib_382 * 1.01:
+                    buy_score += 1.0
+                    reasons.append(f"피보나치 38.2% 지지({fib_382:.0f}) 근처")
+                elif current >= high * 0.99:
+                    sell_score += 1.5
+                    reasons.append(f"최고점 근처({high:.0f}) — 저항")
 
-## 최근 뉴스
-{json.dumps(news_headlines[:5], indent=2, ensure_ascii=False) if news_headlines else '뉴스 없음'}
+                ind["fib_382"] = round(fib_382, 2)
+                ind["fib_500"] = round(fib_500, 2)
+                ind["fib_618"] = round(fib_618, 2)
 
-## 추가 정보
-- 현재가: {market_data.get('current_price')}
-- 펀딩비: {market_data.get('funding_rate')}
+            # 200 EMA 기준
+            ema200 = ind.get("ema_200", 0)
+            if ema200 and current:
+                if current > ema200 * 1.05:
+                    buy_score += 0.5
+                    reasons.append("EMA200 위 5%+ — 강세")
+                elif current < ema200 * 0.95:
+                    sell_score += 0.5
+                    reasons.append("EMA200 아래 5%+ — 약세")
 
-## 분석 기준
-- 공포탐욕 < 25 = 극도 공포 → 역발상 매수 기회
-- 공포탐욕 > 75 = 극도 탐욕 → 조정 주의
-- 피보나치 61.8% 지지/저항 = 핵심 레벨
-- 부정적 뉴스 (규제, 해킹) = 단기 급락 가능, 기술적 분석 무효화
-- 긍정적 뉴스 (ETF, 기관 채택) = 추세 강화
+            # 24시간 변동
+            if len(prices) >= 24:
+                change_24h = (current - float(prices.iloc[-24])) / float(prices.iloc[-24]) * 100
+                if change_24h > 5:
+                    sell_score += 0.5
+                    reasons.append(f"24H +{change_24h:.1f}% — 과열 주의")
+                elif change_24h < -5:
+                    buy_score += 0.5
+                    reasons.append(f"24H {change_24h:.1f}% — 과매도")
 
-## 응답 형식 (반드시 JSON)
-{{"signal": "BUY/SELL/HOLD", "confidence": 0.0~1.0, "reasoning": "분석 근거"}}"""
+        return RuleBasedAnalyst.build_result(self.agent_id, buy_score, sell_score, reasons, ind)
 
-        response = await self.call_llm(prompt)
-        indicators = {
-            **fib_levels,
-            "fear_greed_index": sentiment.get("fear_greed_index"),
-            "news_sentiment_avg": sentiment.get("news_sentiment_avg"),
-        }
-        return self._parse_response(response, indicators)
-
-    async def respond_to_debate(self, own_analysis: AnalysisResult, other_analyses: list[AnalysisResult], debate_context: str) -> str:
-        others_summary = "\n".join(
-            f"- {a.agent_id}: {a.signal.value} (확신도 {a.confidence:.2f}) — {a.reasoning[:100]}"
-            for a in other_analyses
-        )
-        prompt = f"""당신의 분석: {own_analysis.signal.value} (확신도 {own_analysis.confidence:.2f})
-근거: {own_analysis.reasoning}
-
-다른 에이전트들의 의견:
-{others_summary}
-
-토론 맥락:
-{debate_context}
-
-거시/감성 관점에서 반론하거나 동의해주세요. 특히 뉴스나 시장 심리가 기술적 분석을 압도할 수 있는 상황인지 판단해주세요. 간결하게 핵심만."""
-
-        return await self.call_llm(prompt)
-
-    def _parse_response(self, response: str, indicators: dict) -> AnalysisResult:
-        try:
-            text = response
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            data = json.loads(text.strip())
-            signal = Signal(data.get("signal", "HOLD").upper())
-            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
-            reasoning = data.get("reasoning", "")
-        except (json.JSONDecodeError, ValueError, KeyError):
-            signal = Signal.HOLD
-            confidence = 0.3
-            reasoning = response[:500]
-
-        return AnalysisResult(
-            agent_id=self.agent_id,
-            signal=signal,
-            confidence=confidence,
-            reasoning=reasoning,
-            key_indicators=indicators,
-        )
+    async def respond_to_debate(self, own, others, context) -> str:
+        return f"{self.agent_id}: {own.signal.value} ({own.confidence:.0%}) — {own.reasoning}"

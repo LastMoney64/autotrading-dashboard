@@ -1,111 +1,77 @@
 """
-Whale Agent — 고래 지갑 추적 전문 분석 에이전트
+Whale Agent — 고래 추적 (코드 기반, 비용 $0)
 
-대량 이체, 거래소 입출금, 고래 지갑 동향을 추적하여
-큰손들의 매매 방향을 감지한다.
+펀딩비, OI, 거래량 급변으로 고래 활동을 추정.
+(실제 Whale Alert API 연동 시 확장 가능)
 """
 
-import json
-from core.base_agent import BaseAgent, AgentConfig, AnalysisResult, Signal
+from core.base_agent import BaseAgent, AnalysisResult
+from agents.analysts.rule_based_mixin import RuleBasedAnalyst
 
 
 class WhaleAgent(BaseAgent):
-
-    INDICATORS = [
-        "whale_transactions",       # 대량 이체 (1000 BTC 이상)
-        "exchange_inflow",          # 거래소 입금량
-        "exchange_outflow",         # 거래소 출금량
-        "exchange_netflow",         # 순유입 (입금-출금)
-        "top_holders_change",       # 상위 지갑 보유량 변화
-    ]
 
     def get_system_prompt(self) -> str:
         return self.config.system_prompt
 
     async def analyze(self, market_data: dict) -> AnalysisResult:
-        whale_data = market_data.get("whale", {})
-        onchain = market_data.get("onchain", {})
+        buy_score = 0.0
+        sell_score = 0.0
+        reasons = []
+        ind = {}
 
-        # 고래 데이터 통합
-        whale_metrics = {
-            "whale_transactions": whale_data.get("large_transactions", []),
-            "exchange_inflow_btc": whale_data.get("exchange_inflow", 0),
-            "exchange_outflow_btc": whale_data.get("exchange_outflow", 0),
-            "exchange_netflow_btc": whale_data.get("exchange_netflow", 0),
-            "top_100_balance_change_24h": whale_data.get("top_holders_change", 0),
-            "whale_buy_count": whale_data.get("buy_count", 0),
-            "whale_sell_count": whale_data.get("sell_count", 0),
-        }
+        # 펀딩비로 대형 포지션 방향 추정
+        funding = market_data.get("funding_rate")
+        if funding is not None:
+            try:
+                fr = float(funding)
+                ind["funding_rate"] = fr
+                if fr < -0.02:
+                    buy_score += 2.0
+                    reasons.append(f"극단 음수 펀딩비({fr:.4f}) — 숏 청산 펌프 가능")
+                elif fr > 0.02:
+                    sell_score += 2.0
+                    reasons.append(f"극단 양수 펀딩비({fr:.4f}) — 롱 청산 덤프 가능")
+            except (ValueError, TypeError):
+                pass
 
-        prompt = f"""현재 {market_data.get('symbol', 'BTC/USDT')} 고래 동향을 분석해주세요.
+        # 거래량 스파이크로 고래 활동 추정
+        candles = market_data.get("candles", {}).get("1h")
+        if candles and len(candles) >= 20:
+            import pandas as pd
+            df = pd.DataFrame(candles)
+            vol_last = float(df["volume"].iloc[-1])
+            vol_avg = float(df["volume"].tail(20).mean())
+            if vol_avg > 0:
+                ratio = vol_last / vol_avg
+                ind["volume_ratio"] = round(ratio, 2)
+                if ratio > 3.0:
+                    reasons.append(f"이상 거래량({ratio:.1f}x) — 고래 활동 추정")
+                    price_change = float(df["close"].iloc[-1] - df["close"].iloc[-2])
+                    if price_change > 0:
+                        buy_score += 1.5
+                    else:
+                        sell_score += 1.5
 
-## 고래 지갑 데이터
-{json.dumps(whale_metrics, indent=2, ensure_ascii=False)}
+        # 호가창 불균형
+        orderbook = market_data.get("orderbook", {})
+        if orderbook:
+            bid_vol = sum(b[1] for b in orderbook.get("bids", [])[:10]) if orderbook.get("bids") else 0
+            ask_vol = sum(a[1] for a in orderbook.get("asks", [])[:10]) if orderbook.get("asks") else 0
+            if bid_vol and ask_vol:
+                imbalance = bid_vol / (bid_vol + ask_vol)
+                ind["bid_ratio"] = round(imbalance, 3)
+                if imbalance > 0.65:
+                    buy_score += 1.0
+                    reasons.append(f"호가 매수벽({imbalance:.0%})")
+                elif imbalance < 0.35:
+                    sell_score += 1.0
+                    reasons.append(f"호가 매도벽({1-imbalance:.0%})")
 
-## 추가 시장 정보
-- 현재가: {market_data.get('current_price')}
-- 24H 거래량: {market_data.get('volume_24h')}
+        if not reasons:
+            reasons.append("고래 활동 감지 안됨")
 
-## 분석 기준
-- 거래소 대량 입금 = 매도 준비 (약세 신호)
-- 거래소 대량 출금 = 장기 보유 의도 (강세 신호)
-- 고래 지갑 순매수 증가 = 축적 단계 (강세)
-- 고래 지갑 순매도 증가 = 분배 단계 (약세)
-- 대량 이체 직후 가격 변동 주의
-- 거래소 순유입 > 5000 BTC = 강한 매도 압력
-- 거래소 순유출 > 5000 BTC = 강한 매수 신호
+        return RuleBasedAnalyst.build_result(self.agent_id, buy_score, sell_score, reasons, ind)
 
-## 응답 형식 (반드시 JSON)
-{{"signal": "BUY/SELL/HOLD", "confidence": 0.0~1.0, "reasoning": "분석 근거"}}"""
-
-        response = await self.call_llm(prompt)
-        return self._parse_response(response, whale_metrics)
-
-    async def respond_to_debate(
-        self,
-        own_analysis: AnalysisResult,
-        other_analyses: list[AnalysisResult],
-        debate_context: str,
-    ) -> str:
-        others_summary = "\n".join(
-            f"- {a.agent_id}: {a.signal.value} (확신도 {a.confidence:.2f}) — {a.reasoning[:100]}"
-            for a in other_analyses
-        )
-        prompt = f"""당신의 분석: {own_analysis.signal.value} (확신도 {own_analysis.confidence:.2f})
-근거: {own_analysis.reasoning}
-
-다른 에이전트들의 의견:
-{others_summary}
-
-토론 맥락:
-{debate_context}
-
-고래 동향 관점에서 반론하거나 동의해주세요.
-특히 기술적 지표와 고래 움직임이 엇갈릴 때 왜 고래를 따라야 하는지 또는
-왜 이번에는 기술적 신호가 맞는지 근거를 대세요. 간결하게 핵심만."""
-
-        return await self.call_llm(prompt)
-
-    def _parse_response(self, response: str, indicators: dict) -> AnalysisResult:
-        try:
-            text = response
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            data = json.loads(text.strip())
-            signal = Signal(data.get("signal", "HOLD").upper())
-            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
-            reasoning = data.get("reasoning", "")
-        except (json.JSONDecodeError, ValueError, KeyError):
-            signal = Signal.HOLD
-            confidence = 0.3
-            reasoning = response[:500]
-
-        return AnalysisResult(
-            agent_id=self.agent_id,
-            signal=signal,
-            confidence=confidence,
-            reasoning=reasoning,
-            key_indicators=indicators,
-        )
+    async def respond_to_debate(self, own, others, context) -> str:
+        return f"{self.agent_id}: {own.signal.value} ({own.confidence:.0%}) — {own.reasoning}"

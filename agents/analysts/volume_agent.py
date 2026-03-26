@@ -1,98 +1,76 @@
 """
-Volume Agent — 거래량/자금 흐름 전문 분석 에이전트
+Volume Agent — 거래량/자금 흐름 (코드 기반, 비용 $0)
 
-OBV, VWAP, 미결제약정(OI), 펀딩비 기반으로 자금 흐름을 분석.
+OBV, VWAP, OI, 펀딩비 기반으로 자금 흐름을 분석.
 """
 
-import json
-from core.base_agent import BaseAgent, AgentConfig, AnalysisResult, Signal
+from core.base_agent import BaseAgent, AnalysisResult
 from data.indicators import IndicatorEngine
+from agents.analysts.rule_based_mixin import RuleBasedAnalyst
 
 
 class VolumeAgent(BaseAgent):
 
-    INDICATORS = ["obv", "vwap", "volume_24h"]
+    INDICATORS = ["obv", "vwap", "current_price"]
 
     def get_system_prompt(self) -> str:
         return self.config.system_prompt
 
     async def analyze(self, market_data: dict) -> AnalysisResult:
         candles_1h = market_data.get("candles", {}).get("1h")
-        candles_4h = market_data.get("candles", {}).get("4h")
+        ind = IndicatorEngine.compute_for_agent(candles_1h, self.INDICATORS) if candles_1h is not None else {}
 
-        ind_1h = IndicatorEngine.compute_for_agent(candles_1h, self.INDICATORS) if candles_1h is not None else {}
-        ind_4h = IndicatorEngine.compute_for_agent(candles_4h, self.INDICATORS) if candles_4h is not None else {}
+        buy_score = 0.0
+        sell_score = 0.0
+        reasons = []
 
-        prompt = f"""현재 {market_data.get('symbol', 'BTC/USDT')} 시장을 거래량/자금흐름 관점에서 분석해주세요.
+        # 펀딩비
+        funding = market_data.get("funding_rate")
+        if funding is not None:
+            try:
+                fr = float(funding)
+                if fr < -0.01:
+                    buy_score += 2.0
+                    reasons.append(f"펀딩비 극단 음수({fr:.4f}) — 숏 과열, 롱 유리")
+                elif fr < -0.005:
+                    buy_score += 1.0
+                    reasons.append(f"펀딩비 음수({fr:.4f}) — 숏 우세")
+                elif fr > 0.01:
+                    sell_score += 2.0
+                    reasons.append(f"펀딩비 극단 양수({fr:.4f}) — 롱 과열")
+                elif fr > 0.005:
+                    sell_score += 1.0
+                    reasons.append(f"펀딩비 양수({fr:.4f}) — 롱 우세")
+            except (ValueError, TypeError):
+                pass
 
-## 1H 지표
-{json.dumps(ind_1h, indent=2, ensure_ascii=False)}
+        # 거래량 트렌드
+        if candles_1h and len(candles_1h) >= 20:
+            import pandas as pd
+            df = pd.DataFrame(candles_1h)
+            vol_recent = float(df["volume"].tail(5).mean())
+            vol_avg = float(df["volume"].tail(20).mean())
+            if vol_avg > 0:
+                ratio = vol_recent / vol_avg
+                if ratio > 2.0:
+                    reasons.append(f"거래량 급등({ratio:.1f}x)")
+                    price_change = float(df["close"].iloc[-1] - df["close"].iloc[-5])
+                    if price_change > 0:
+                        buy_score += 1.5
+                    else:
+                        sell_score += 1.5
+                elif ratio < 0.5:
+                    reasons.append(f"거래량 감소({ratio:.1f}x)")
 
-## 4H 지표
-{json.dumps(ind_4h, indent=2, ensure_ascii=False)}
+        # OI (미결제약정)
+        oi = market_data.get("open_interest")
+        if oi:
+            try:
+                reasons.append(f"미결제약정: {float(oi):,.0f}")
+            except (ValueError, TypeError):
+                pass
 
-## 추가 정보
-- 현재가: {market_data.get('current_price')}
-- 펀딩비: {market_data.get('funding_rate')}%
-- 미결제약정(OI): {market_data.get('open_interest')}
+        return RuleBasedAnalyst.build_result(self.agent_id, buy_score, sell_score, reasons, ind)
 
-## 분석 기준
-- OBV 상승 + 가격 횡보 = 매집 (매수 신호)
-- OBV 하락 + 가격 횡보 = 분배 (매도 신호)
-- 가격 > VWAP = 매수 우위, 가격 < VWAP = 매도 우위
-- 펀딩비 극단적 양수 (+0.05%↑) = 롱 과열 → 숏 청산 주의
-- 펀딩비 극단적 음수 (-0.05%↓) = 숏 과열 → 숏 스퀴즈 가능
-- OI 급증 + 가격 횡보 = 큰 움직임 임박
-
-## 응답 형식 (반드시 JSON)
-{{"signal": "BUY/SELL/HOLD", "confidence": 0.0~1.0, "reasoning": "분석 근거"}}"""
-
-        response = await self.call_llm(prompt)
-        indicators = {
-            **ind_1h,
-            "funding_rate": market_data.get("funding_rate"),
-            "open_interest": market_data.get("open_interest"),
-        }
-        return self._parse_response(response, indicators)
-
-    async def respond_to_debate(self, own_analysis: AnalysisResult, other_analyses: list[AnalysisResult], debate_context: str) -> str:
-        others_summary = "\n".join(
-            f"- {a.agent_id}: {a.signal.value} (확신도 {a.confidence:.2f}) — {a.reasoning[:100]}"
-            for a in other_analyses
-        )
-        prompt = f"""당신의 분석: {own_analysis.signal.value} (확신도 {own_analysis.confidence:.2f})
-근거: {own_analysis.reasoning}
-
-다른 에이전트들의 의견:
-{others_summary}
-
-토론 맥락:
-{debate_context}
-
-거래량/자금흐름 관점에서 반론하거나 동의해주세요. 간결하게 핵심만."""
-
-        return await self.call_llm(prompt)
-
-    def _parse_response(self, response: str, indicators: dict) -> AnalysisResult:
-        try:
-            text = response
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            data = json.loads(text.strip())
-            signal = Signal(data.get("signal", "HOLD").upper())
-            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
-            reasoning = data.get("reasoning", "")
-        except (json.JSONDecodeError, ValueError, KeyError):
-            signal = Signal.HOLD
-            confidence = 0.3
-            reasoning = response[:500]
-
-        return AnalysisResult(
-            agent_id=self.agent_id,
-            signal=signal,
-            confidence=confidence,
-            reasoning=reasoning,
-            key_indicators=indicators,
-        )
+    async def respond_to_debate(self, own, others, context) -> str:
+        return f"{self.agent_id}: {own.signal.value} ({own.confidence:.0%}) — {own.reasoning}"
