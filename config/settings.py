@@ -38,6 +38,10 @@ class Settings:
     stop_loss_pct: float = 1.5              # 손절 % (레버리지 적용 전 가격 기준)
     take_profit_pct: float = 4.0            # 익절 % (손절의 ~2.5배)
 
+    # ── 수수료 ────────────────────────────────────────
+    fee_maker_pct: float = 0.02             # Maker 수수료 0.02%
+    fee_taker_pct: float = 0.05             # Taker 수수료 0.05% (시장가)
+
     # ── 에이전트 설정 ───────────────────────────────────
     min_confidence_threshold: float = 0.4    # 최소 확신도 (적극적 매매)
     debate_rounds: int = 0                   # 토론 라운드 수 (0=분석만, 비용 절감)

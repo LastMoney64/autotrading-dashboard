@@ -21,8 +21,9 @@ logger = logging.getLogger(__name__)
 class TradeFeedback:
     """거래 완료 후 피드백 & 자기발전"""
 
-    def __init__(self, db: TradingDB):
+    def __init__(self, db: TradingDB, fee_taker_pct: float = 0.05):
         self.db = db
+        self.fee_taker_pct = fee_taker_pct  # Taker 수수료 %
         self.trade_history: list[dict] = []
         self.stats = {
             "total_trades": 0,
@@ -62,8 +63,15 @@ class TradeFeedback:
             "agents_wrong": ["whale", "onchain"],  # 틀린 에이전트
         }
         """
-        is_win = trade.get("pnl_pct_leveraged", 0) > 0
-        pnl = trade.get("pnl_pct_leveraged", 0)
+        # 수수료 차감 (진입 + 청산 = 2회 Taker)
+        leverage = trade.get("leverage", 1)
+        fee_impact_pct = self.fee_taker_pct * 2 * leverage / 100  # 마진 대비 수수료 %
+        raw_pnl = trade.get("pnl_pct_leveraged", 0)
+        pnl = raw_pnl - (fee_impact_pct * 100)  # 수수료 차감
+        is_win = pnl > 0
+
+        trade["fee_pct"] = fee_impact_pct * 100
+        trade["pnl_after_fee"] = pnl
 
         # 기본 통계 업데이트
         self.stats["total_trades"] += 1

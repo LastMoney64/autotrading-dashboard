@@ -185,7 +185,7 @@ async def initialize_system():
         "dashboard_app": dashboard_app,
         "okx": okx,
         "signal_filter": signal_filter,
-        "feedback": TradeFeedback(db),
+        "feedback": TradeFeedback(db, fee_taker_pct=settings.fee_taker_pct),
     }
 
 
@@ -490,13 +490,24 @@ async def main_loop(system: dict):
                             # 동적 레버리지
                             dynamic_leverage = okx.calculate_leverage(confidence, volatility)
 
-                            # 동적 손절/익절
+                            # 동적 손절/익절 (수수료 반영)
                             price = market_data.get("ticker", {}).get("last", 0)
                             sl_base = settings.stop_loss_pct / 100
                             tp_base = settings.take_profit_pct / 100
                             lev_factor = 20 / dynamic_leverage
                             sl_pct = sl_base * lev_factor
-                            tp_pct = tp_base * lev_factor
+
+                            # TP는 수수료 이상이어야 수익 보장
+                            # 수수료: 진입+청산 = Taker 0.05% × 2 = 0.1%
+                            fee_breakeven_pct = (settings.fee_taker_pct * 2) / 100
+                            tp_pct = max(tp_base * lev_factor, fee_breakeven_pct * 3)  # 수수료의 3배 이상
+
+                            logger.info(
+                                f"[{pair}] 수수료 분석: "
+                                f"Taker {settings.fee_taker_pct}% × 2 × {dynamic_leverage}x = "
+                                f"마진 대비 {fee_breakeven_pct * dynamic_leverage * 100:.1f}% | "
+                                f"TP {tp_pct*100:.2f}% > 손익분기"
+                            )
 
                             if side == "buy":
                                 stop_loss = price * (1 - sl_pct)
