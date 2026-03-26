@@ -24,11 +24,11 @@ class JudgmentResult:
     """Judge의 최종 판결"""
     signal: Signal
     confidence: float
-    position_size_pct: float        # 계좌 대비 포지션 크기 (%)
-    entry_price: Optional[float]
-    stop_loss: Optional[float]
-    take_profit: Optional[float]
-    reasoning: str
+    position_size_pct: float = 0.0        # 계좌 대비 포지션 크기 (%)
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    reasoning: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> dict:
