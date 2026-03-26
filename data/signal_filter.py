@@ -36,8 +36,13 @@ class SignalFilter:
         self._cooldown_seconds = 1800
         self._last_trigger_time: dict[str, float] = {}
 
-    def check(self, symbol: str, candles_1h: list[dict], candles_15m: list[dict] = None) -> dict:
-        """신호 감지 여부 확인"""
+    def check(
+        self, symbol: str, candles_1h: list[dict],
+        candles_15m: list[dict] = None,
+        funding_rate: float = 0,
+        market_regime: dict = None,
+    ) -> dict:
+        """신호 감지 여부 확인 (펀딩비 + 국면 반영)"""
         if not candles_1h or len(candles_1h) < 50:
             return self._no_signal("데이터 부족")
 
@@ -141,6 +146,26 @@ class SignalFilter:
             signals.append(f"스토캐스틱 과매수({stoch_k:.0f})")
             sell_signals += 1
 
+        # ── 8. 펀딩비 극단값 ────────────────────────────
+        if funding_rate:
+            if funding_rate > 0.01:  # 0.01% 이상 = 롱 과열
+                signals.append(f"펀딩비 롱과열({funding_rate:.4f}%)")
+                sell_signals += 1
+            elif funding_rate < -0.01:  # -0.01% 이하 = 숏 과열
+                signals.append(f"펀딩비 숏과열({funding_rate:.4f}%)")
+                buy_signals += 1
+
+        # ── 9. 멀티 타임프레임 정렬 보너스 ──────────────
+        if market_regime:
+            if market_regime.get("timeframe_alignment"):
+                align_dir = market_regime.get("alignment_direction", "MIXED")
+                if align_dir == "BUY":
+                    signals.append(f"TF정렬 BUY ({market_regime.get('tf_signals', {})})")
+                    buy_signals += 1
+                elif align_dir == "SELL":
+                    signals.append(f"TF정렬 SELL ({market_regime.get('tf_signals', {})})")
+                    sell_signals += 1
+
         # ── 판정 ───────────────────────────────────────
         signal_count = len(signals)
         direction_count = max(buy_signals, sell_signals)
@@ -193,6 +218,7 @@ class SignalFilter:
             "direction_strength": direction_count,
             "indicators": indicators,
             "reason": reason,
+            "market_regime": market_regime or {},
         }
 
     def _no_signal(self, reason: str) -> dict:

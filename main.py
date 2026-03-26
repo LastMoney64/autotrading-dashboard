@@ -29,6 +29,7 @@ from monitoring.telegram_monitor import TelegramMonitor
 from dashboard.app import create_app
 from execution.okx_exchange import OKXExchange
 from data.signal_filter import SignalFilter
+from data.market_regime import MarketRegimeDetector
 from evolution.trade_feedback import TradeFeedback
 
 # ── 에이전트 임포트 ──────────────────────────────────────
@@ -194,15 +195,15 @@ def _check_position_exit(
 ) -> tuple[bool, str]:
     """
     열린 포지션 능동 청산 판단 (코드 기반, $0)
+    트레일링 스탑 + 기술적 신호 기반
 
     Returns: (should_close, reason)
     """
-    import pandas as pd
-    from data.indicators import IndicatorEngine
-
     side = position.get("side", "buy")
     is_long = side in ("buy", "long")
     indicators = filter_result.get("indicators", {})
+    current_price = indicators.get("current_price", 0)
+    entry_price = position.get("entry_price", 0)
 
     rsi = indicators.get("rsi", 50)
     adx = indicators.get("adx", 0)
@@ -211,6 +212,37 @@ def _check_position_exit(
     macd_hist = indicators.get("macd_histogram", 0)
     direction = filter_result.get("direction_hint", "NEUTRAL")
     direction_strength = filter_result.get("direction_strength", 0)
+
+    # ── 트레일링 스탑 ────────────────────────────────
+    if position.get("use_trailing") and current_price and entry_price:
+        trailing_pct = position.get("trailing_pct", 0.5) / 100
+
+        if is_long:
+            # 최고가 업데이트
+            highest = position.get("highest_price", entry_price)
+            if current_price > highest:
+                position["highest_price"] = current_price
+                highest = current_price
+
+            # 최고가 대비 trailing_pct만큼 하락하면 청산
+            trailing_stop = highest * (1 - trailing_pct)
+            if current_price <= trailing_stop and current_price > entry_price:
+                pnl = (current_price - entry_price) / entry_price * 100
+                return True, f"트레일링 스탑 (최고 ${highest:,.0f} → 현재 ${current_price:,.0f}, 수익 {pnl:.1f}% 확보)"
+        else:
+            # 최저가 업데이트
+            lowest = position.get("lowest_price", entry_price)
+            if current_price < lowest:
+                position["lowest_price"] = current_price
+                lowest = current_price
+
+            # 최저가 대비 trailing_pct만큼 상승하면 청산
+            trailing_stop = lowest * (1 + trailing_pct)
+            if current_price >= trailing_stop and current_price < entry_price:
+                pnl = (entry_price - current_price) / entry_price * 100
+                return True, f"트레일링 스탑 (최저 ${lowest:,.0f} → 현재 ${current_price:,.0f}, 수익 {pnl:.1f}% 확보)"
+
+    # ── 기술적 신호 기반 청산 ─────────────────────────
 
     # 1. 반대 방향 강한 신호 → 즉시 청산
     if is_long and direction == "SELL" and direction_strength >= 3:
@@ -224,11 +256,14 @@ def _check_position_exit(
     if not is_long and ema_20 and ema_50 and ema_20 > ema_50 and adx > 30:
         return True, f"추세 전환 (EMA 정배열 + ADX {adx:.0f})"
 
-    # 3. 과매수/과매도 반전
-    if is_long and rsi > 80:
-        return True, f"RSI 극단 과매수 ({rsi:.0f}) — 익절 권고"
-    if not is_long and rsi < 20:
-        return True, f"RSI 극단 과매도 ({rsi:.0f}) — 익절 권고"
+    # 3. 과매수/과매도 반전 (수익중일 때만)
+    if current_price and entry_price:
+        in_profit = (current_price > entry_price) if is_long else (current_price < entry_price)
+        if in_profit:
+            if is_long and rsi > 80:
+                return True, f"RSI 극단 과매수 ({rsi:.0f}) — 수익 확보"
+            if not is_long and rsi < 20:
+                return True, f"RSI 극단 과매도 ({rsi:.0f}) — 수익 확보"
 
     # 4. MACD 반전 + 추세 약화
     if is_long and macd_hist and macd_hist < 0 and rsi > 65:
@@ -403,16 +438,42 @@ async def main_loop(system: dict):
                         logger.debug(f"[{pair}] OKX 미연결 — 스킵")
                         continue
 
-                    # 캔들 데이터만 가져오기 (가벼운 API 호출)
+                    # 캔들 데이터 (멀티 타임프레임)
                     candles_1h = await okx.get_candles(pair, "1h", 100)
                     candles_15m = await okx.get_candles(pair, "15m", 100)
+                    candles_4h = await okx.get_candles(pair, "4h", 100)
 
                     if not candles_1h:
                         logger.warning(f"[{pair}] 캔들 데이터 없음")
                         continue
 
-                    # 지표 기반 필터링 (코드로 계산 — 무료)
-                    filter_result = signal_filter.check(pair, candles_1h, candles_15m)
+                    # 펀딩비 조회
+                    try:
+                        funding_data = await okx.get_funding_rate(pair)
+                        funding_rate = funding_data.get("funding_rate", 0)
+                    except Exception:
+                        funding_rate = 0
+
+                    # 시장 국면 감지 + 멀티 타임프레임 정렬
+                    regime_detector = MarketRegimeDetector()
+                    market_regime = regime_detector.detect(candles_15m, candles_1h, candles_4h)
+
+                    # 지표 기반 필터링 (펀딩비 + 국면 포함)
+                    filter_result = signal_filter.check(
+                        pair, candles_1h, candles_15m,
+                        funding_rate=funding_rate,
+                        market_regime=market_regime,
+                    )
+
+                    # 30분마다 국면 상태 로그
+                    if scan_count % 30 == 1:
+                        regime_label = market_regime.get("regime_label", "?")
+                        tf_aligned = market_regime.get("timeframe_alignment", False)
+                        tf_dir = market_regime.get("alignment_direction", "?")
+                        logger.info(
+                            f"[{pair}] 국면={regime_label} TF정렬={tf_aligned}({tf_dir}) "
+                            f"펀딩={funding_rate:.4f}%"
+                        )
 
                     # ═══════════════════════════════════════════
                     # STAGE 1.5: 열린 포지션 능동 관리 (무료)
@@ -523,6 +584,13 @@ async def main_loop(system: dict):
                         confidence = record.judgment.confidence
                         balance = await okx.get_balance()
 
+                        # 국면별 전략 파라미터 적용
+                        regime_params = market_regime.get("strategy_params", {})
+                        regime_size_mult = regime_params.get("position_size_multiplier", 1.0)
+                        regime_lev_mult = regime_params.get("leverage_multiplier", 1.0)
+                        tf_boost = market_regime.get("confidence_boost", 0)
+                        confidence = min(1.0, confidence + tf_boost)  # TF 정렬 보너스
+
                         # 확신도 기반 포지션 사이징 (적극적)
                         if confidence >= 0.8:
                             position_pct = 40  # 매우 강한 신호
@@ -532,6 +600,9 @@ async def main_loop(system: dict):
                             position_pct = 20  # 보통 신호
                         else:
                             position_pct = 15  # 약한 신호 (최소)
+
+                        # 국면별 포지션 크기 조정
+                        position_pct *= regime_size_mult
 
                         # 피드백 기반 포지션 조정 (연패 시 축소)
                         fb_adj = feedback.get_adjustments()
@@ -556,8 +627,12 @@ async def main_loop(system: dict):
                             else:
                                 volatility = "normal"
 
-                            # 동적 레버리지
+                            # 동적 레버리지 (국면 보정)
                             dynamic_leverage = okx.calculate_leverage(confidence, volatility)
+                            dynamic_leverage = max(
+                                settings.leverage_min,
+                                int(dynamic_leverage * regime_lev_mult)
+                            )
 
                             # 동적 손절/익절 (수수료 반영)
                             price = market_data.get("ticker", {}).get("last", 0)
@@ -596,7 +671,9 @@ async def main_loop(system: dict):
 
                             if order:
                                 exposure = usdt_amount * dynamic_leverage
-                                # 포지션 추적에 추가 (피드백용 진입 조건 + cycle_id)
+                                # 포지션 추적에 추가
+                                use_trailing = regime_params.get("use_trailing_stop", False)
+                                trailing_pct = regime_params.get("trailing_pct", 0.5)
                                 known_positions[pair] = {
                                     "symbol": pair,
                                     "side": side,
@@ -608,6 +685,11 @@ async def main_loop(system: dict):
                                     "entry_time": datetime.utcnow().isoformat(),
                                     "cycle_id": record.cycle_id,
                                     "judge_signal": signal,
+                                    "use_trailing": use_trailing,
+                                    "trailing_pct": trailing_pct,
+                                    "highest_price": price if side == "buy" else None,
+                                    "lowest_price": price if side == "sell" else None,
+                                    "regime": market_regime.get("regime_label", ""),
                                 }
                                 logger.info(
                                     f"✅ 주문 체결: {side.upper()} {pair} "
