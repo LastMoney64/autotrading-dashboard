@@ -186,6 +186,56 @@ async def initialize_system():
     }
 
 
+def _check_position_exit(
+    position: dict, filter_result: dict, candles_1h: list[dict]
+) -> tuple[bool, str]:
+    """
+    열린 포지션 능동 청산 판단 (코드 기반, $0)
+
+    Returns: (should_close, reason)
+    """
+    import pandas as pd
+    from data.indicators import IndicatorEngine
+
+    side = position.get("side", "buy")
+    is_long = side in ("buy", "long")
+    indicators = filter_result.get("indicators", {})
+
+    rsi = indicators.get("rsi", 50)
+    adx = indicators.get("adx", 0)
+    ema_20 = indicators.get("ema_20", 0)
+    ema_50 = indicators.get("ema_50", 0)
+    macd_hist = indicators.get("macd_histogram", 0)
+    direction = filter_result.get("direction_hint", "NEUTRAL")
+    direction_strength = filter_result.get("direction_strength", 0)
+
+    # 1. 반대 방향 강한 신호 → 즉시 청산
+    if is_long and direction == "SELL" and direction_strength >= 3:
+        return True, f"반대 방향 강한 신호 (SELL {direction_strength}개)"
+    if not is_long and direction == "BUY" and direction_strength >= 3:
+        return True, f"반대 방향 강한 신호 (BUY {direction_strength}개)"
+
+    # 2. 추세 전환 감지
+    if is_long and ema_20 and ema_50 and ema_20 < ema_50 and adx > 30:
+        return True, f"추세 전환 (EMA 역배열 + ADX {adx:.0f})"
+    if not is_long and ema_20 and ema_50 and ema_20 > ema_50 and adx > 30:
+        return True, f"추세 전환 (EMA 정배열 + ADX {adx:.0f})"
+
+    # 3. 과매수/과매도 반전
+    if is_long and rsi > 80:
+        return True, f"RSI 극단 과매수 ({rsi:.0f}) — 익절 권고"
+    if not is_long and rsi < 20:
+        return True, f"RSI 극단 과매도 ({rsi:.0f}) — 익절 권고"
+
+    # 4. MACD 반전 + 추세 약화
+    if is_long and macd_hist and macd_hist < 0 and rsi > 65:
+        return True, f"MACD 반전 + RSI 고점 — 모멘텀 약화"
+    if not is_long and macd_hist and macd_hist > 0 and rsi < 35:
+        return True, f"MACD 반전 + RSI 저점 — 모멘텀 약화"
+
+    return False, ""
+
+
 async def main_loop(system: dict):
     """메인 트레이딩 루프"""
     settings = system["settings"]
@@ -283,6 +333,44 @@ async def main_loop(system: dict):
 
                     # 지표 기반 필터링 (코드로 계산 — 무료)
                     filter_result = signal_filter.check(pair, candles_1h, candles_15m)
+
+                    # ═══════════════════════════════════════════
+                    # STAGE 1.5: 열린 포지션 능동 관리 (무료)
+                    # ═══════════════════════════════════════════
+                    if pair in known_positions and okx:
+                        pos = known_positions[pair]
+                        should_close, close_reason = _check_position_exit(
+                            pos, filter_result, candles_1h
+                        )
+                        if should_close:
+                            logger.info(f"🔄 [{pair}] 능동 청산: {close_reason}")
+                            result = await okx.close_position(
+                                pair, pos.get("side", "buy"), pos.get("size", 0)
+                            )
+                            if result:
+                                # PnL 계산
+                                entry = pos.get("entry_price", 0)
+                                current = filter_result["indicators"].get("current_price", 0)
+                                if entry and current:
+                                    if pos.get("side") == "buy" or pos.get("side") == "long":
+                                        pnl_pct = (current - entry) / entry * 100
+                                    else:
+                                        pnl_pct = (entry - current) / entry * 100
+                                    lev = pos.get("leverage", 1)
+                                    pnl_pct_lev = pnl_pct * lev
+                                else:
+                                    pnl_pct_lev = 0
+
+                                emoji = "💰" if pnl_pct_lev > 0 else "💸"
+                                await telegram.send(
+                                    f"{emoji} <b>능동 청산</b>\n\n"
+                                    f"<b>심볼:</b> {pair}\n"
+                                    f"<b>방향:</b> {pos.get('side', '?')}\n"
+                                    f"<b>사유:</b> {close_reason}\n"
+                                    f"<b>예상 PnL:</b> {pnl_pct_lev:+.2f}%\n"
+                                )
+                                del known_positions[pair]
+                                logger.info(f"✅ [{pair}] 능동 청산 완료: {close_reason}")
 
                     if not filter_result["should_trigger"]:
                         # 신호 없음 → AI 호출 안 함 → 비용 $0
