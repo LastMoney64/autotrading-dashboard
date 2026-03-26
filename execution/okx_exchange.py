@@ -278,8 +278,12 @@ class OKXExchange:
                 logger.error(f"수량이 0 이하: {amount}")
                 return None
 
-            # 시장가 주문
-            params = {"tdMode": "cross"}  # 교차 마진
+            # 시장가 주문 (헤지모드 대응)
+            pos_side = "long" if side == "buy" else "short"
+            params = {
+                "tdMode": "cross",
+                "posSide": pos_side,
+            }
 
             order = await self.exchange.create_order(
                 symbol=symbol,
@@ -323,8 +327,13 @@ class OKXExchange:
         try:
             # 롱 청산 → sell, 숏 청산 → buy
             close_side = "sell" if side == "buy" or side == "long" else "buy"
+            pos_side = "long" if side == "buy" or side == "long" else "short"
 
-            params = {"tdMode": "cross", "reduceOnly": True}
+            params = {
+                "tdMode": "cross",
+                "posSide": pos_side,
+                "reduceOnly": True,
+            }
 
             order = await self.exchange.create_order(
                 symbol=symbol,
@@ -367,7 +376,7 @@ class OKXExchange:
         """손절 주문"""
         try:
             sl_side = "sell" if side == "buy" else "buy"
-            trigger_direction = "below" if side == "buy" else "above"
+            pos_side = "long" if side == "buy" else "short"
 
             await self.exchange.create_order(
                 symbol=symbol,
@@ -376,6 +385,7 @@ class OKXExchange:
                 amount=amount,
                 params={
                     "tdMode": "cross",
+                    "posSide": pos_side,
                     "reduceOnly": True,
                     "stopLossPrice": price,
                 },
@@ -390,6 +400,7 @@ class OKXExchange:
         """익절 주문"""
         try:
             tp_side = "sell" if side == "buy" else "buy"
+            pos_side = "long" if side == "buy" else "short"
 
             await self.exchange.create_order(
                 symbol=symbol,
@@ -398,6 +409,7 @@ class OKXExchange:
                 amount=amount,
                 params={
                     "tdMode": "cross",
+                    "posSide": pos_side,
                     "reduceOnly": True,
                     "takeProfitPrice": price,
                 },
