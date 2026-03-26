@@ -13,7 +13,7 @@ TradeFeedback — 거래 완료 후 피드백 & 자기발전 엔진
 import logging
 from datetime import datetime
 from typing import Optional
-from db.database import TradingDB
+from db.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class TradeFeedback:
     """거래 완료 후 피드백 & 자기발전"""
 
-    def __init__(self, db: TradingDB, fee_taker_pct: float = 0.05):
+    def __init__(self, db: Database, fee_taker_pct: float = 0.05):
         self.db = db
         self.fee_taker_pct = fee_taker_pct  # Taker 수수료 %
         self.trade_history: list[dict] = []
