@@ -1,12 +1,13 @@
 """
-DebateRoom — 토론 진행 엔진
+DebateRoom — 비용 최적화 토론 엔진
 
-9개 분석 에이전트의 독립 분석 결과를 받아서:
-1. 전체 공유
-2. 2라운드 토론 (반론/보완)
-3. Moderator가 요약
-4. Judge가 최종 판결
-5. Risk가 거부권 검토
+비용 절감 전략:
+1. 관련 에이전트만 선택적 참여 (9개 → 3~4개)
+2. 토론 라운드 제거 (0라운드 = 분석만)
+3. Moderator 규칙 기반 (AI 호출 없음)
+4. HOLD일 때 Risk 호출 안 함
+
+API 호출 최소화: 분석 3~4회 + Judge 1회 + Risk 1회 = 5~6회/사이클
 """
 
 import asyncio
@@ -19,14 +20,22 @@ from core.message_bus import MessageBus, MessageType
 from debate.debate_record import DebateRecord, JudgmentResult, RiskReviewResult
 
 
+# 방향별 관련 에이전트 매핑
+DIRECTION_AGENTS = {
+    "BUY": ["trend", "momentum", "volume", "whale"],
+    "SELL": ["trend", "momentum", "volatility", "onchain"],
+    "NEUTRAL": ["trend", "momentum", "volatility"],
+}
+
+
 class DebateRoom:
-    """토론 진행 엔진"""
+    """비용 최적화 토론 엔진"""
 
     def __init__(
         self,
         registry: AgentRegistry,
         message_bus: MessageBus,
-        debate_rounds: int = 2,
+        debate_rounds: int = 0,  # 토론 라운드 제거
         analysis_timeout: float = 30.0,
         debate_timeout: float = 20.0,
     ):
@@ -47,8 +56,9 @@ class DebateRoom:
             symbol=symbol,
         )
 
-        # ── 1단계: 독립 분석 (병렬) ─────────────────────────
-        analyses = await self._run_analyses(market_data)
+        # ── 1단계: 선택적 분석 (관련 에이전트만) ───────────
+        direction = market_data.get("pre_filter", {}).get("direction_hint", "NEUTRAL")
+        analyses = await self._run_selective_analyses(market_data, direction)
         for a in analyses:
             record.add_analysis(a)
 
@@ -56,22 +66,11 @@ class DebateRoom:
             record.finalize("SKIPPED", {"reason": "No analysis results"})
             return record
 
-        # ── 2단계: 토론 라운드 ───────────────────────────────
-        for round_num in range(1, self.debate_rounds + 1):
-            opinions = await self._run_debate_round(
-                round_num, analyses, record
-            )
-            record.add_debate_round(round_num, opinions)
-
-        # ── 3단계: Moderator 요약 ────────────────────────────
-        summary = await self._run_moderator(analyses, record)
+        # ── 2단계: 규칙 기반 Moderator (AI 호출 없음) ──────
+        summary = self._rule_based_summary(analyses, record)
         record.set_moderator_summary(summary)
 
-        # ── 4단계: Memory 검색 (유사 상황) ───────────────────
-        similar = await self._query_memory(market_data, analyses)
-        record.similar_episodes = similar
-
-        # ── 5단계: Judge 판결 ────────────────────────────────
+        # ── 3단계: Judge 판결 ──────────────────────────────
         judgment = await self._run_judge(market_data, record)
         if judgment:
             record.set_judgment(judgment)
@@ -79,20 +78,23 @@ class DebateRoom:
             record.finalize("SKIPPED", {"reason": "Judge failed"})
             return record
 
-        # ── 6단계: Risk 검토 ─────────────────────────────────
-        risk_review = await self._run_risk_review(market_data, record)
-        if risk_review:
-            record.set_risk_review(risk_review)
+        # ── 4단계: Risk 검토 (BUY/SELL일 때만) ─────────────
+        if judgment.signal != Signal.HOLD:
+            risk_review = await self._run_risk_review(market_data, record)
+            if risk_review:
+                record.set_risk_review(risk_review)
+        else:
+            # HOLD면 Risk 호출 안 함 (비용 절감)
+            record.set_risk_review(RiskReviewResult(approved=True, risk_score=0.0))
 
-        # ── 최종 결정 ────────────────────────────────────────
+        # ── 최종 결정 ──────────────────────────────────────
         if record.risk_review and not record.risk_review.approved:
             record.finalize("VETOED")
         elif record.judgment.signal == Signal.HOLD:
             record.finalize("HOLD")
         else:
-            record.finalize("READY_TO_EXECUTE")
+            record.finalize("EXECUTED")
 
-        # 메시지 버스에 결과 브로드캐스트
         await self.bus.broadcast(
             MessageType.JUDGMENT,
             sender_id="debate_room",
@@ -101,17 +103,33 @@ class DebateRoom:
 
         return record
 
-    # ── 1단계: 병렬 분석 ──────────────────────────────────
+    # ── 선택적 분석 ──────────────────────────────────────
 
-    async def _run_analyses(self, market_data: dict) -> list[AnalysisResult]:
-        """모든 활성 분석 에이전트를 병렬로 실행"""
-        analysts = self.registry.get_active_analysts()
-        if not analysts:
+    async def _run_selective_analyses(
+        self, market_data: dict, direction: str
+    ) -> list[AnalysisResult]:
+        """방향에 관련된 에이전트만 선택적 실행 (3~4개)"""
+        all_analysts = self.registry.get_active_analysts()
+        if not all_analysts:
             return []
+
+        # 방향에 맞는 에이전트 선택
+        target_ids = DIRECTION_AGENTS.get(direction, DIRECTION_AGENTS["NEUTRAL"])
+        selected = [
+            a for a in all_analysts
+            if any(tid in a.agent_id.lower() for tid in target_ids)
+        ]
+
+        # 선택된 게 없으면 상위 4개
+        if not selected:
+            selected = all_analysts[:4]
+
+        # 최대 4개로 제한
+        selected = selected[:4]
 
         tasks = [
             self._safe_analyze(agent, market_data)
-            for agent in analysts
+            for agent in selected
         ]
 
         results = await asyncio.gather(*tasks)
@@ -120,161 +138,67 @@ class DebateRoom:
     async def _safe_analyze(
         self, agent: BaseAgent, market_data: dict
     ) -> Optional[AnalysisResult]:
-        """타임아웃 포함 안전한 분석 실행"""
         try:
             return await asyncio.wait_for(
                 agent.analyze(market_data),
                 timeout=self.analysis_timeout,
             )
-        except asyncio.TimeoutError:
-            return None
-        except Exception:
-            return None
-
-    # ── 2단계: 토론 라운드 ────────────────────────────────
-
-    async def _run_debate_round(
-        self,
-        round_num: int,
-        analyses: list[AnalysisResult],
-        record: DebateRecord,
-    ) -> dict[str, str]:
-        """토론 한 라운드 실행"""
-        analysts = self.registry.get_active_analysts()
-        debate_context = self._build_debate_context(record, round_num)
-
-        tasks = {}
-        for agent in analysts:
-            own = next((a for a in analyses if a.agent_id == agent.agent_id), None)
-            if own is None:
-                continue
-            others = [a for a in analyses if a.agent_id != agent.agent_id]
-            tasks[agent.agent_id] = self._safe_debate(
-                agent, own, others, debate_context
-            )
-
-        if not tasks:
-            return {}
-
-        results = await asyncio.gather(*tasks.values())
-        opinions = {}
-        for agent_id, result in zip(tasks.keys(), results):
-            if result:
-                opinions[agent_id] = result
-
-        return opinions
-
-    async def _safe_debate(
-        self,
-        agent: BaseAgent,
-        own: AnalysisResult,
-        others: list[AnalysisResult],
-        context: str,
-    ) -> Optional[str]:
-        """타임아웃 포함 안전한 토론 응답"""
-        try:
-            return await asyncio.wait_for(
-                agent.respond_to_debate(own, others, context),
-                timeout=self.debate_timeout,
-            )
         except (asyncio.TimeoutError, Exception):
             return None
 
-    def _build_debate_context(self, record: DebateRecord, current_round: int) -> str:
-        """이전 라운드 토론 내용을 컨텍스트로 구성"""
-        if current_round == 1:
-            return "첫 번째 토론 라운드입니다. 다른 에이전트의 분석을 보고 의견을 제시해주세요."
+    # ── 규칙 기반 Moderator (무료) ───────────────────────
 
-        parts = [f"이전 {current_round - 1}라운드 토론 내용:"]
-        for dr in record.debate_rounds:
-            parts.append(f"\n--- 라운드 {dr.round_number} ---")
-            for agent_id, opinion in dr.opinions.items():
-                parts.append(f"[{agent_id}] {opinion[:200]}")
-
-        parts.append(f"\n이제 라운드 {current_round}입니다. 핵심 쟁점에 집중해주세요.")
-        return "\n".join(parts)
-
-    # ── 3단계: Moderator ──────────────────────────────────
-
-    async def _run_moderator(
+    def _rule_based_summary(
         self, analyses: list[AnalysisResult], record: DebateRecord
     ) -> str:
-        """Moderator가 토론을 요약"""
-        moderator = self.registry.get_special_agent(AgentRole.MODERATOR)
-        if not moderator:
-            return self._fallback_summary(analyses, record)
-
-        analyses_text = "\n".join(
-            f"[{a.agent_id}] {a.signal.value} (확신도 {a.confidence:.2f}): {a.reasoning[:150]}"
-            for a in analyses
-        )
-
-        debate_text = ""
-        for dr in record.debate_rounds:
-            debate_text += f"\n--- 라운드 {dr.round_number} ---\n"
-            for agent_id, opinion in dr.opinions.items():
-                debate_text += f"[{agent_id}] {opinion[:200]}\n"
-
-        prompt = f"""다음 토론을 요약해주세요.
-
-## 개별 분석 결과
-{analyses_text}
-
-## 토론 내용
-{debate_text}
-
-## 요약 형식
-1. 신호 분포 (BUY/SELL/HOLD 각 몇 명)
-2. 핵심 합의 사항
-3. 핵심 충돌 사항
-4. 가장 강한 논거 (매수/매도 각각)
-5. Judge에게 전달할 권고사항"""
-
-        try:
-            return await asyncio.wait_for(
-                moderator.call_llm(prompt),
-                timeout=30.0,
-            )
-        except (asyncio.TimeoutError, Exception):
-            return self._fallback_summary(analyses, record)
-
-    def _fallback_summary(
-        self, analyses: list[AnalysisResult], record: DebateRecord
-    ) -> str:
-        """Moderator 실패 시 규칙 기반 요약"""
+        """AI 호출 없이 규칙으로 요약 (비용 $0)"""
         consensus = record.signal_consensus
         avg_conf = record.avg_confidence
-        return (
-            f"신호 분포: BUY {consensus['BUY']} / SELL {consensus['SELL']} / HOLD {consensus['HOLD']}\n"
-            f"평균 확신도: {avg_conf:.1%}\n"
-            f"Moderator 요약 불가 — 규칙 기반 요약 제공"
-        )
 
-    # ── 4단계: Memory 검색 ────────────────────────────────
+        buy_count = consensus.get("BUY", 0)
+        sell_count = consensus.get("SELL", 0)
+        hold_count = consensus.get("HOLD", 0)
+        total = buy_count + sell_count + hold_count
 
-    async def _query_memory(
-        self, market_data: dict, analyses: list[AnalysisResult]
-    ) -> list[dict]:
-        """Memory Agent에게 유사 상황 검색 요청"""
-        memory_agent = self.registry.get_special_agent(AgentRole.MEMORY)
-        if not memory_agent:
-            return []
+        parts = [
+            f"# 토론 요약 보고서",
+            f"## 1. 신호 분포 - **HOLD**: {hold_count}명 - **BUY**: {buy_count}명 - **SELL**: {sell_count}명",
+            f"**확신도**: 평균 {avg_conf:.1%}",
+        ]
 
-        # TODO: Memory 시스템 구현 후 연동 (PHASE 6)
-        return []
+        # 컨센서스 강도 판단
+        if total > 0:
+            max_signal = max(consensus, key=consensus.get)
+            max_pct = consensus[max_signal] / total
 
-    # ── 5단계: Judge ──────────────────────────────────────
+            if max_pct >= 0.75:
+                parts.append(f"## 2. 합의: 강한 {max_signal} 컨센서스 ({max_pct:.0%})")
+            elif max_pct >= 0.5:
+                parts.append(f"## 2. 합의: 약한 {max_signal} 컨센서스 ({max_pct:.0%})")
+            else:
+                parts.append("## 2. 합의: 의견 분산 — 신중한 판단 필요")
+
+        # 각 에이전트 핵심 의견
+        parts.append("## 3. 에이전트 의견")
+        for a in analyses:
+            parts.append(f"- **{a.agent_id}**: {a.signal.value} ({a.confidence:.0%}) — {a.reasoning[:100]}")
+
+        return "\n".join(parts)
+
+    # ── Judge ────────────────────────────────────────────
 
     async def _run_judge(
         self, market_data: dict, record: DebateRecord
     ) -> Optional[JudgmentResult]:
-        """Judge Agent가 최종 판결"""
         judge = self.registry.get_special_agent(AgentRole.JUDGE)
         if not judge:
             return self._fallback_judgment(record)
 
+        pre_filter = market_data.get("pre_filter", {})
+        direction_hint = pre_filter.get("direction_hint", "NEUTRAL")
+
         analyses_text = "\n".join(
-            f"[{a.agent_id}] {a.signal.value} (확신도 {a.confidence:.2f}): {a.reasoning[:150]}"
+            f"[{a.agent_id}] {a.signal.value} (확신도 {a.confidence:.2f}): {a.reasoning[:200]}"
             for a in record.analyses
         )
 
@@ -283,6 +207,8 @@ class DebateRoom:
 ## 시장 정보
 - 심볼: {record.symbol}
 - 현재가: {market_data.get('current_price')}
+- 사전 필터 신호: {pre_filter.get('reason', 'N/A')}
+- 방향 힌트: {direction_hint}
 
 ## 에이전트 분석 (총 {len(record.analyses)}명)
 {analyses_text}
@@ -290,8 +216,11 @@ class DebateRoom:
 ## Moderator 요약
 {record.moderator_summary}
 
-## 유사 과거 상황
-{record.similar_episodes if record.similar_episodes else '데이터 없음'}
+## 매매 성향
+- 적극적으로 매매하되, 손실 관리에 집중
+- 방향이 명확하면 BUY 또는 SELL을 적극 추천
+- HOLD는 정말 판단이 어려울 때만 사용
+- 확신도 0.6 이상이면 진입 추천
 
 ## 반드시 JSON으로 응답
 {{"signal": "BUY/SELL/HOLD", "confidence": 0.0~1.0, "position_size_pct": 0.5~3.0, "entry_price": 가격, "stop_loss": 가격, "take_profit": 가격, "reasoning": "판결 근거"}}"""
@@ -306,7 +235,6 @@ class DebateRoom:
             return self._fallback_judgment(record)
 
     def _parse_judgment(self, response: str, market_data: dict) -> JudgmentResult:
-        """Judge 응답 파싱"""
         import json
         try:
             text = response
@@ -337,26 +265,24 @@ class DebateRoom:
             )
 
     def _fallback_judgment(self, record: DebateRecord) -> JudgmentResult:
-        """Judge 실패 시 다수결 기반 판결"""
         consensus = record.signal_consensus
         max_signal = max(consensus, key=consensus.get)
 
         return JudgmentResult(
             signal=Signal(max_signal),
-            confidence=record.avg_confidence * 0.7,
-            position_size_pct=0.5 if max_signal != "HOLD" else 0.0,
+            confidence=record.avg_confidence * 0.8,
+            position_size_pct=1.0 if max_signal != "HOLD" else 0.0,
             entry_price=None,
             stop_loss=None,
             take_profit=None,
             reasoning=f"Fallback: 다수결 {max_signal} (Judge 응답 없음)",
         )
 
-    # ── 6단계: Risk 검토 ──────────────────────────────────
+    # ── Risk 검토 ────────────────────────────────────────
 
     async def _run_risk_review(
         self, market_data: dict, record: DebateRecord
     ) -> Optional[RiskReviewResult]:
-        """Risk Agent가 최종 검토"""
         risk_agent = self.registry.get_special_agent(AgentRole.RISK)
         if not risk_agent:
             return self._fallback_risk_review(record)
@@ -377,13 +303,13 @@ class DebateRoom:
 - 신호 분포: {record.signal_consensus}
 - 평균 확신도: {record.avg_confidence:.2f}
 
-## VETO 조건 확인
-1. 평균 확신도 < 0.5?
-2. 에이전트 간 의견 심하게 분산?
-3. 포지션 크기 과다?
+## 리스크 성향: 적극적
+- 확신도 40% 이상이면 승인 (기존 50%)
+- 방향이 명확하면 포지션 크기 유지
+- 과도한 리스크만 거부 (레버리지 고려)
 
 ## 반드시 JSON으로 응답
-{{"approved": true/false, "veto_reason": "거부 사유 (승인 시 null)", "risk_score": 0.0~1.0, "adjustments": {{"position_size_pct": 조정값}} 또는 null}}"""
+{{"approved": true/false, "veto_reason": "거부 사유 (승인 시 null)", "risk_score": 0.0~1.0, "adjustments": null}}"""
 
         try:
             response = await asyncio.wait_for(
@@ -395,7 +321,6 @@ class DebateRoom:
             return self._fallback_risk_review(record)
 
     def _parse_risk_review(self, response: str) -> RiskReviewResult:
-        """Risk 응답 파싱"""
         import json
         try:
             text = response
@@ -415,12 +340,11 @@ class DebateRoom:
             return RiskReviewResult(approved=True, risk_score=0.5)
 
     def _fallback_risk_review(self, record: DebateRecord) -> RiskReviewResult:
-        """Risk Agent 실패 시 규칙 기반 검토"""
-        # 평균 확신도 0.5 미만이면 자동 거부
-        if record.avg_confidence < 0.5:
+        # 적극적: 확신도 40% 이상이면 승인
+        if record.avg_confidence < 0.4:
             return RiskReviewResult(
                 approved=False,
-                veto_reason=f"평균 확신도 {record.avg_confidence:.1%} < 50%",
+                veto_reason=f"평균 확신도 {record.avg_confidence:.1%} < 40%",
                 risk_score=0.8,
             )
         return RiskReviewResult(approved=True, risk_score=0.3)

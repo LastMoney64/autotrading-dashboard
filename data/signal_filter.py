@@ -1,13 +1,12 @@
 """
 SignalFilter — 사전 필터링 엔진 (무료, 코드 기반)
 
-매 60초마다 실행하여 지표를 계산하고,
-유의미한 신호가 감지될 때만 AI 토론을 발동시킨다.
-
-목적: Claude API 호출을 하루 ~43,000회 → ~100~300회로 줄임
+비용 최적화: 지표 스캔은 무료, AI 토론은 강한 신호에서만 발동
+방향이 명확할 때만 토론 → 적극적 매매
 """
 
 import logging
+import time
 import pandas as pd
 from data.indicators import IndicatorEngine
 
@@ -23,7 +22,7 @@ class SignalFilter:
         rsi_overbought: float = 70,
         adx_trend_threshold: float = 25,
         bb_squeeze_threshold: float = 0.02,
-        volume_spike_multiplier: float = 2.0,
+        volume_spike_multiplier: float = 1.8,
         min_signals_to_trigger: int = 2,
     ):
         self.rsi_oversold = rsi_oversold
@@ -33,35 +32,20 @@ class SignalFilter:
         self.volume_spike_multiplier = volume_spike_multiplier
         self.min_signals_to_trigger = min_signals_to_trigger
 
-        # 마지막 트리거 후 최소 대기 사이클 (연속 트리거 방지)
-        self._cooldown_cycles = 5  # 5분 쿨다운
-        self._cycles_since_trigger: dict[str, int] = {}
+        # 쿨다운: 30분 (초 단위)
+        self._cooldown_seconds = 1800
+        self._last_trigger_time: dict[str, float] = {}
 
     def check(self, symbol: str, candles_1h: list[dict], candles_15m: list[dict] = None) -> dict:
-        """
-        신호 감지 여부 확인
-
-        Returns:
-            {
-                "should_trigger": True/False,
-                "signals": ["rsi_oversold", "macd_cross", ...],
-                "signal_count": 3,
-                "direction_hint": "BUY" / "SELL" / "NEUTRAL",
-                "indicators": { ... },
-                "reason": "RSI 과매도(28) + MACD 골든크로스 + 거래량 급등"
-            }
-        """
+        """신호 감지 여부 확인"""
         if not candles_1h or len(candles_1h) < 50:
             return self._no_signal("데이터 부족")
 
-        # DataFrame 변환
         df_1h = pd.DataFrame(candles_1h)
         df_15m = pd.DataFrame(candles_15m) if candles_15m and len(candles_15m) > 20 else None
 
-        # 지표 계산 (무료)
         indicators = IndicatorEngine.compute_all(df_1h)
 
-        # 신호 감지
         signals = []
         buy_signals = 0
         sell_signals = 0
@@ -76,11 +60,6 @@ class SignalFilter:
             sell_signals += 1
 
         # ── 2. MACD 크로스 ─────────────────────────────
-        macd_val = indicators.get("macd", 0)
-        macd_sig = indicators.get("macd_signal", 0)
-        macd_hist = indicators.get("macd_histogram", 0)
-
-        # 히스토그램 부호 전환 감지 (크로스)
         if len(df_1h) >= 3:
             macd_data = IndicatorEngine.macd(df_1h)
             hist_series = macd_data["macd_histogram"]
@@ -101,23 +80,20 @@ class SignalFilter:
         bb_mid = indicators.get("bollinger_mid", 0)
 
         if price and bb_lower and price <= bb_lower:
-            signals.append(f"BB 하단 이탈")
+            signals.append("BB 하단 이탈")
             buy_signals += 1
         elif price and bb_upper and price >= bb_upper:
-            signals.append(f"BB 상단 이탈")
+            signals.append("BB 상단 이탈")
             sell_signals += 1
 
-        # BB 스퀴즈 (변동성 수축 → 곧 큰 움직임)
         if bb_upper and bb_lower and bb_mid:
             bb_width = (bb_upper - bb_lower) / (bb_mid + 1e-10)
             if bb_width < self.bb_squeeze_threshold:
                 signals.append(f"BB 스퀴즈(폭 {bb_width:.3f})")
-                # 방향 미정이므로 양쪽 카운트 안 함
 
         # ── 4. ADX 강한 추세 ───────────────────────────
         adx = indicators.get("adx", 0)
         if adx >= self.adx_trend_threshold:
-            # EMA로 추세 방향 판단
             ema_20 = indicators.get("ema_20", 0)
             ema_50 = indicators.get("ema_50", 0)
             if ema_20 and ema_50:
@@ -135,7 +111,6 @@ class SignalFilter:
             if vol_avg > 0 and vol_current > vol_avg * self.volume_spike_multiplier:
                 ratio = vol_current / vol_avg
                 signals.append(f"거래량 급등({ratio:.1f}x)")
-                # 방향은 가격 움직임으로 판단
                 price_change = float(df_1h["close"].iloc[-1] - df_1h["close"].iloc[-2])
                 if price_change > 0:
                     buy_signals += 1
@@ -168,13 +143,21 @@ class SignalFilter:
 
         # ── 판정 ───────────────────────────────────────
         signal_count = len(signals)
-        should_trigger = signal_count >= self.min_signals_to_trigger
+        direction_count = max(buy_signals, sell_signals)
 
-        # 쿨다운 체크
-        cycles = self._cycles_since_trigger.get(symbol, self._cooldown_cycles)
-        if should_trigger and cycles < self._cooldown_cycles:
+        # 방향이 같은 신호가 2개 이상이어야 발동
+        should_trigger = (
+            signal_count >= self.min_signals_to_trigger
+            and direction_count >= 2
+        )
+
+        # 쿨다운 체크 (30분)
+        now = time.time()
+        last_trigger = self._last_trigger_time.get(symbol, 0)
+        if should_trigger and (now - last_trigger) < self._cooldown_seconds:
+            remaining = int(self._cooldown_seconds - (now - last_trigger))
+            logger.debug(f"[{symbol}] 쿨다운 중 (잔여 {remaining}초)")
             should_trigger = False
-            logger.debug(f"[{symbol}] 쿨다운 중 ({cycles}/{self._cooldown_cycles})")
 
         # 방향 결정
         if buy_signals > sell_signals:
@@ -184,21 +167,21 @@ class SignalFilter:
         else:
             direction = "NEUTRAL"
 
-        # 쿨다운 카운터 업데이트
+        # NEUTRAL이면 발동 안 함 (방향 불명확)
+        if direction == "NEUTRAL":
+            should_trigger = False
+
+        # 쿨다운 업데이트
         if should_trigger:
-            self._cycles_since_trigger[symbol] = 0
-        else:
-            self._cycles_since_trigger[symbol] = cycles + 1
+            self._last_trigger_time[symbol] = now
 
         reason = " + ".join(signals) if signals else "신호 없음"
 
         if should_trigger:
             logger.info(
-                f"🔔 [{symbol}] 신호 감지! ({signal_count}개) "
-                f"방향={direction} | {reason}"
+                f"🔔 [{symbol}] 신호 감지! ({signal_count}개, "
+                f"{direction} 방향 {direction_count}개) | {reason}"
             )
-        else:
-            logger.debug(f"[{symbol}] 신호 {signal_count}개 (임계값 {self.min_signals_to_trigger} 미달)")
 
         return {
             "should_trigger": should_trigger,
@@ -207,6 +190,7 @@ class SignalFilter:
             "direction_hint": direction,
             "buy_signals": buy_signals,
             "sell_signals": sell_signals,
+            "direction_strength": direction_count,
             "indicators": indicators,
             "reason": reason,
         }
@@ -219,6 +203,7 @@ class SignalFilter:
             "direction_hint": "NEUTRAL",
             "buy_signals": 0,
             "sell_signals": 0,
+            "direction_strength": 0,
             "indicators": {},
             "reason": reason,
         }

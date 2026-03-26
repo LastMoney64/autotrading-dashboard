@@ -39,8 +39,8 @@ class Settings:
     take_profit_pct: float = 4.0            # 익절 % (손절의 ~2.5배)
 
     # ── 에이전트 설정 ───────────────────────────────────
-    min_confidence_threshold: float = 0.6    # 최소 확신도
-    debate_rounds: int = 2                   # 토론 라운드 수
+    min_confidence_threshold: float = 0.4    # 최소 확신도 (적극적 매매)
+    debate_rounds: int = 0                   # 토론 라운드 수 (0=분석만, 비용 절감)
     max_agents: int = 20                     # 최대 에이전트 수
 
     # ── 진화 설정 ───────────────────────────────────────
