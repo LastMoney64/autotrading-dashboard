@@ -105,19 +105,36 @@ class TelegramMonitor:
         signal = j.get("signal", "?")
         emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⏸"}.get(signal, "❓")
 
+        entry = j.get('entry_price') or 0
+        sl = j.get('stop_loss') or 0
+        tp = j.get('take_profit') or 0
+        conf = j.get('confidence') or 0
+        pos_pct = j.get('position_size_pct') or 0
+        order = record_dict.get("order", {})
+        lev = record_dict.get("leverage") or order.get("leverage", 0)
+        exposure = record_dict.get("exposure", 0)
+
+        # 실제 주문 정보가 있으면 사용
+        if order:
+            entry = order.get("price") or entry
+            sl = order.get("stop_loss") or sl
+            tp = order.get("take_profit") or tp
+
         text = f"""{emoji} <b>포지션 진입</b>
 
 <b>신호:</b> {signal}
-<b>확신도:</b> {j.get('confidence', 0):.0%}
-<b>포지션:</b> {j.get('position_size_pct', 0):.1f}%
-<b>진입가:</b> ${j.get('entry_price', 0):,.2f}
-<b>손절가:</b> ${j.get('stop_loss', 0):,.2f}
-<b>익절가:</b> ${j.get('take_profit', 0):,.2f}
+<b>확신도:</b> {conf:.0%}
+<b>레버리지:</b> {lev}x
+<b>진입가:</b> ${entry:,.2f}
+<b>마진:</b> ${order.get('usdt_amount', 0) or 0:,.2f}
+<b>노출:</b> ${exposure:,.2f}
+<b>손절가:</b> ${sl:,.2f}
+<b>익절가:</b> ${tp:,.2f}
 
-<b>에이전트 투표:</b> BUY {consensus.get('BUY', 0)} / SELL {consensus.get('SELL', 0)} / HOLD {consensus.get('HOLD', 0)}
+<b>투표:</b> BUY {consensus.get('BUY', 0)} / SELL {consensus.get('SELL', 0)} / HOLD {consensus.get('HOLD', 0)}
 <b>리스크:</b> {'✅ 승인' if r.get('approved') else '❌ 거부'}
 
-<i>{j.get('reasoning', '')[:200]}</i>"""
+<i>{(j.get('reasoning') or '')[:200]}</i>"""
 
         await self.send(text)
 
