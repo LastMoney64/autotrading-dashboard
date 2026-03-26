@@ -201,6 +201,7 @@ async def main_loop(system: dict):
     scan_count = 0
     trigger_count = 0
     paused = False
+    known_positions: dict[str, dict] = {}  # symbol → position 추적
 
     # pause/resume 콜백
     def on_pause():
@@ -231,6 +232,36 @@ async def main_loop(system: dict):
                 if paused:
                     await asyncio.sleep(2)
                     continue
+
+                # ═══════════════════════════════════════════
+                # STAGE 0: 포지션 동기화 (OKX 실제 상태 확인)
+                # ═══════════════════════════════════════════
+                if okx:
+                    try:
+                        current_positions = await okx.get_positions()
+                        current_symbols = {p["symbol"] for p in current_positions}
+
+                        # 사라진 포지션 감지 (수동 청산)
+                        for sym, pos in list(known_positions.items()):
+                            if sym not in current_symbols:
+                                pnl_text = f"진입가 ${pos.get('entry_price', 0):,.2f}"
+                                await telegram.send(
+                                    f"👋 <b>포지션 수동 청산 감지</b>\n\n"
+                                    f"<b>심볼:</b> {sym}\n"
+                                    f"<b>방향:</b> {pos.get('side', '?')}\n"
+                                    f"<b>{pnl_text}</b>\n"
+                                    f"<b>마진:</b> ${pos.get('margin', 0):.2f}\n\n"
+                                    f"<i>봇 외부에서 청산됨 — 포지션 추적 동기화 완료</i>"
+                                )
+                                logger.info(f"👋 [{sym}] 수동 청산 감지 — 포지션 추적에서 제거")
+                                del known_positions[sym]
+
+                        # 새 포지션 업데이트
+                        for pos in current_positions:
+                            known_positions[pos["symbol"]] = pos
+
+                    except Exception as e:
+                        logger.debug(f"포지션 동기화 에러: {e}")
 
                 for pair in settings.trading_pairs:
                     # ═══════════════════════════════════════════
@@ -357,6 +388,14 @@ async def main_loop(system: dict):
 
                             if order:
                                 exposure = usdt_amount * dynamic_leverage
+                                # 포지션 추적에 추가
+                                known_positions[pair] = {
+                                    "symbol": pair,
+                                    "side": side,
+                                    "entry_price": price,
+                                    "margin": usdt_amount,
+                                    "leverage": dynamic_leverage,
+                                }
                                 logger.info(
                                     f"✅ 주문 체결: {side.upper()} {pair} "
                                     f"마진=${usdt_amount:.2f} 노출=${exposure:.2f} "
