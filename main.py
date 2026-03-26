@@ -302,15 +302,17 @@ async def main_loop(system: dict):
                         confidence = record.judgment.confidence
                         balance = await okx.get_balance()
 
-                        # 확신도 기반 포지션 사이징
-                        if confidence >= 0.85:
-                            position_pct = min(30, 20 + (confidence - 0.85) * 100)
-                        elif confidence >= 0.7:
-                            position_pct = min(20, 10 + (confidence - 0.7) * 67)
+                        # 확신도 기반 포지션 사이징 (적극적)
+                        if confidence >= 0.8:
+                            position_pct = 40  # 매우 강한 신호
+                        elif confidence >= 0.6:
+                            position_pct = 30  # 강한 신호
+                        elif confidence >= 0.4:
+                            position_pct = 20  # 보통 신호
                         else:
-                            position_pct = min(10, 5 + (confidence - 0.6) * 50)
+                            position_pct = 15  # 약한 신호 (최소)
 
-                        usdt_amount = balance["free"] * (position_pct / 100)
+                        usdt_amount = max(0, balance["free"] * (position_pct / 100))
 
                         if usdt_amount >= 3:
                             side = "buy" if signal == "BUY" else "sell"

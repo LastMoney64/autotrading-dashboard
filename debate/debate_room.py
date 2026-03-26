@@ -136,12 +136,16 @@ class DebateRoom:
 
     async def _hybrid_judge(self, market_data: dict, record: DebateRecord) -> JudgmentResult:
         """코드로 판결하고, 매우 강한 신호일 때만 AI에게 확인"""
-        consensus = record.signal_consensus
-        avg_conf = record.avg_confidence
+        # 확신도 30% 이하인 에이전트 제외 (데이터 없는 에이전트)
+        valid_analyses = [a for a in record.analyses if a.confidence > 0.3]
+        if not valid_analyses:
+            valid_analyses = record.analyses  # 전부 낮으면 그냥 전체 사용
 
-        buy_count = consensus.get("BUY", 0)
-        sell_count = consensus.get("SELL", 0)
-        total = buy_count + sell_count + consensus.get("HOLD", 0)
+        buy_count = sum(1 for a in valid_analyses if a.signal == Signal.BUY)
+        sell_count = sum(1 for a in valid_analyses if a.signal == Signal.SELL)
+        hold_count = sum(1 for a in valid_analyses if a.signal == Signal.HOLD)
+        total = buy_count + sell_count + hold_count
+        avg_conf = sum(a.confidence for a in valid_analyses) / len(valid_analyses) if valid_analyses else 0
 
         if total == 0:
             return JudgmentResult(
@@ -149,23 +153,23 @@ class DebateRoom:
                 reasoning="분석 결과 없음"
             )
 
-        # 가중 평균 확신도 계산
-        buy_conf = sum(a.confidence for a in record.analyses if a.signal == Signal.BUY)
-        sell_conf = sum(a.confidence for a in record.analyses if a.signal == Signal.SELL)
+        # 가중 평균 확신도 계산 (유효 에이전트만)
+        buy_conf = sum(a.confidence for a in valid_analyses if a.signal == Signal.BUY)
+        sell_conf = sum(a.confidence for a in valid_analyses if a.signal == Signal.SELL)
 
-        # ── 코드 기반 판결 ─────────────────────────────────
-        if buy_count >= total * 0.6 and buy_conf > sell_conf:
+        # ── 코드 기반 판결 (적극적) ──────────────────────────
+        if buy_count >= total * 0.5 and buy_conf >= sell_conf:
             signal = Signal.BUY
-            confidence = min(0.9, avg_conf * (buy_count / total) * 1.5)
-        elif sell_count >= total * 0.6 and sell_conf > buy_conf:
+            confidence = min(0.9, avg_conf * 1.3 + (buy_count / max(total, 1)) * 0.2)
+        elif sell_count >= total * 0.5 and sell_conf >= buy_conf:
             signal = Signal.SELL
-            confidence = min(0.9, avg_conf * (sell_count / total) * 1.5)
-        elif buy_count > sell_count and buy_conf > sell_conf * 1.3:
+            confidence = min(0.9, avg_conf * 1.3 + (sell_count / max(total, 1)) * 0.2)
+        elif buy_count > sell_count:
             signal = Signal.BUY
-            confidence = min(0.75, avg_conf * 1.2)
-        elif sell_count > buy_count and sell_conf > buy_conf * 1.3:
+            confidence = min(0.75, avg_conf * 1.1)
+        elif sell_count > buy_count:
             signal = Signal.SELL
-            confidence = min(0.75, avg_conf * 1.2)
+            confidence = min(0.75, avg_conf * 1.1)
         else:
             signal = Signal.HOLD
             confidence = avg_conf * 0.5
