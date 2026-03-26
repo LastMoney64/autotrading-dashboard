@@ -267,12 +267,25 @@ class OKXExchange:
             price = ticker["last"]
 
             # 수량 계산: USDT 금액 × 레버리지 / 현재가
-            amount = (usdt_amount * leverage) / price
+            amount_coin = (usdt_amount * leverage) / price
 
-            # 마켓 최소 수량에 맞게 조정
+            # OKX 선물은 계약 단위 — contractSize로 변환
             market = self.exchange.market(symbol)
+            contract_size = float(market.get("contractSize", 1) or 1)
+
+            if contract_size and contract_size > 0:
+                amount = amount_coin / contract_size  # BTC → 계약 수
+            else:
+                amount = amount_coin
+
             amount = self.exchange.amount_to_precision(symbol, amount)
             amount = float(amount)
+
+            logger.info(
+                f"[{symbol}] 수량 계산: "
+                f"마진=${usdt_amount:.2f} × {leverage}x = 노출=${usdt_amount * leverage:.2f} "
+                f"→ {amount_coin:.6f} 코인 → {amount} 계약 (계약크기={contract_size})"
+            )
 
             if amount <= 0:
                 logger.error(f"수량이 0 이하: {amount}")
