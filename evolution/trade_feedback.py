@@ -21,10 +21,13 @@ logger = logging.getLogger(__name__)
 class TradeFeedback:
     """거래 완료 후 피드백 & 자기발전"""
 
-    def __init__(self, db: Database, fee_taker_pct: float = 0.05):
+    def __init__(self, db: Database, registry=None, fee_taker_pct: float = 0.05):
         self.db = db
+        self.registry = registry  # AgentRegistry — 가중치 업데이트용
         self.fee_taker_pct = fee_taker_pct  # Taker 수수료 %
         self.trade_history: list[dict] = []
+        # 에이전트별 성과 추적
+        self.agent_scores: dict[str, dict] = {}  # {agent_id: {correct: N, wrong: N}}
         self.stats = {
             "total_trades": 0,
             "wins": 0,
@@ -120,6 +123,9 @@ class TradeFeedback:
         if len(self.trade_history) > 100:
             self.trade_history = self.trade_history[-100:]
 
+        # ── 에이전트 가중치 실시간 업데이트 ──────────────
+        self._update_agent_weights(trade, is_win)
+
         # 피드백 생성
         feedback = self._generate_feedback(trade)
 
@@ -132,6 +138,59 @@ class TradeFeedback:
         )
 
         return feedback
+
+    def _update_agent_weights(self, trade: dict, is_win: bool):
+        """
+        에이전트 가중치 실시간 업데이트 — 자기발전의 핵심
+
+        매 거래마다:
+        - 맞춘 에이전트: 가중치 +5%
+        - 틀린 에이전트: 가중치 -8% (틀린 것에 더 큰 페널티)
+        - 5거래 연속 틀린 에이전트: probation (수습)
+        """
+        if not self.registry:
+            return
+
+        correct_agents = trade.get("agents_correct", [])
+        wrong_agents = trade.get("agents_wrong", [])
+
+        for agent_id in correct_agents:
+            # 에이전트 성과 추적
+            if agent_id not in self.agent_scores:
+                self.agent_scores[agent_id] = {"correct": 0, "wrong": 0, "streak_wrong": 0}
+            self.agent_scores[agent_id]["correct"] += 1
+            self.agent_scores[agent_id]["streak_wrong"] = 0
+
+            # 가중치 UP (+5%)
+            agent = self.registry.get(agent_id)
+            if agent:
+                new_weight = agent.weight * 1.05
+                self.registry.update_weight(agent_id, new_weight)
+                logger.debug(f"  ↑ {agent_id} 가중치 {agent.weight:.2f} → {new_weight:.2f} (정답)")
+
+        for agent_id in wrong_agents:
+            if agent_id not in self.agent_scores:
+                self.agent_scores[agent_id] = {"correct": 0, "wrong": 0, "streak_wrong": 0}
+            self.agent_scores[agent_id]["wrong"] += 1
+            self.agent_scores[agent_id]["streak_wrong"] += 1
+
+            # 가중치 DOWN (-8%)
+            agent = self.registry.get(agent_id)
+            if agent:
+                new_weight = agent.weight * 0.92
+                self.registry.update_weight(agent_id, new_weight)
+                logger.debug(f"  ↓ {agent_id} 가중치 {agent.weight:.2f} → {new_weight:.2f} (오답)")
+
+            # 5연속 오답 → 수습
+            if self.agent_scores[agent_id]["streak_wrong"] >= 5:
+                self.registry.set_probation(agent_id)
+                logger.warning(f"  ⚠️ {agent_id} → 수습 (5연속 오답)")
+
+        # 로그 요약
+        if correct_agents or wrong_agents:
+            logger.info(
+                f"  🔄 에이전트 업데이트: 정답 {len(correct_agents)}명, 오답 {len(wrong_agents)}명"
+            )
 
     def _generate_feedback(self, trade: dict) -> dict:
         """거래 결과 기반 피드백 생성"""

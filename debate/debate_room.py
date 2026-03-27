@@ -135,44 +135,65 @@ class DebateRoom:
     # ══════════════════════════════════════════════════════
 
     async def _hybrid_judge(self, market_data: dict, record: DebateRecord) -> JudgmentResult:
-        """코드로 판결하고, 매우 강한 신호일 때만 AI에게 확인"""
+        """코드로 판결 — 에이전트 가중치 반영 (잘하는 에이전트 의견 우선)"""
         # 확신도 30% 이하인 에이전트 제외 (데이터 없는 에이전트)
         valid_analyses = [a for a in record.analyses if a.confidence > 0.3]
         if not valid_analyses:
-            valid_analyses = record.analyses  # 전부 낮으면 그냥 전체 사용
+            valid_analyses = record.analyses
 
-        buy_count = sum(1 for a in valid_analyses if a.signal == Signal.BUY)
-        sell_count = sum(1 for a in valid_analyses if a.signal == Signal.SELL)
-        hold_count = sum(1 for a in valid_analyses if a.signal == Signal.HOLD)
-        total = buy_count + sell_count + hold_count
-        avg_conf = sum(a.confidence for a in valid_analyses) / len(valid_analyses) if valid_analyses else 0
-
-        if total == 0:
+        if not valid_analyses:
             return JudgmentResult(
                 signal=Signal.HOLD, confidence=0.2, position_size_pct=0.0,
                 reasoning="분석 결과 없음"
             )
 
-        # 가중 평균 확신도 계산 (유효 에이전트만)
-        buy_conf = sum(a.confidence for a in valid_analyses if a.signal == Signal.BUY)
-        sell_conf = sum(a.confidence for a in valid_analyses if a.signal == Signal.SELL)
+        # ── 에이전트 가중치 로드 ──────────────────────────
+        weights = self.registry.get_normalized_weights()
 
-        # ── 코드 기반 판결 (적극적) ──────────────────────────
-        if buy_count >= total * 0.5 and buy_conf >= sell_conf:
+        # 가중치 적용: 잘하는 에이전트의 의견에 더 높은 가중치
+        weighted_buy = 0.0
+        weighted_sell = 0.0
+        weighted_hold = 0.0
+        total_weight = 0.0
+
+        for a in valid_analyses:
+            w = weights.get(a.agent_id, 1.0 / max(len(weights), 1))
+            score = a.confidence * w  # 확신도 × 가중치
+            total_weight += w
+
+            if a.signal == Signal.BUY:
+                weighted_buy += score
+            elif a.signal == Signal.SELL:
+                weighted_sell += score
+            else:
+                weighted_hold += score
+
+        # 정규화
+        if total_weight > 0:
+            weighted_buy /= total_weight
+            weighted_sell /= total_weight
+            weighted_hold /= total_weight
+
+        buy_count = sum(1 for a in valid_analyses if a.signal == Signal.BUY)
+        sell_count = sum(1 for a in valid_analyses if a.signal == Signal.SELL)
+        total = len(valid_analyses)
+
+        # ── 가중치 기반 판결 ──────────────────────────────
+        if weighted_buy > weighted_sell and weighted_buy > weighted_hold:
             signal = Signal.BUY
-            confidence = min(0.9, avg_conf * 1.3 + (buy_count / max(total, 1)) * 0.2)
-        elif sell_count >= total * 0.5 and sell_conf >= buy_conf:
+            confidence = min(0.9, weighted_buy * 1.3 + (buy_count / max(total, 1)) * 0.15)
+        elif weighted_sell > weighted_buy and weighted_sell > weighted_hold:
             signal = Signal.SELL
-            confidence = min(0.9, avg_conf * 1.3 + (sell_count / max(total, 1)) * 0.2)
+            confidence = min(0.9, weighted_sell * 1.3 + (sell_count / max(total, 1)) * 0.15)
         elif buy_count > sell_count:
             signal = Signal.BUY
-            confidence = min(0.75, avg_conf * 1.1)
+            confidence = min(0.7, weighted_buy * 1.1)
         elif sell_count > buy_count:
             signal = Signal.SELL
-            confidence = min(0.75, avg_conf * 1.1)
+            confidence = min(0.7, weighted_sell * 1.1)
         else:
             signal = Signal.HOLD
-            confidence = avg_conf * 0.5
+            confidence = max(weighted_buy, weighted_sell) * 0.4
 
         # 포지션 사이징
         if signal != Signal.HOLD:

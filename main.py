@@ -186,7 +186,7 @@ async def initialize_system():
         "dashboard_app": dashboard_app,
         "okx": okx,
         "signal_filter": signal_filter,
-        "feedback": TradeFeedback(db, fee_taker_pct=settings.fee_taker_pct),
+        "feedback": TradeFeedback(db, registry=registry, fee_taker_pct=settings.fee_taker_pct),
     }
 
 
@@ -276,29 +276,26 @@ def _check_position_exit(
 
 def _update_agent_scores(
     db: Database, position: dict, pnl_pct_lev: float, exit_price: float
-):
+) -> tuple[list[str], list[str]]:
     """
     거래 종료 시 에이전트 정답/오답 판정 + DB 업데이트
 
-    수익 → judge_signal과 같은 신호를 낸 에이전트가 "정답"
-    손실 → judge_signal과 같은 신호를 낸 에이전트가 "오답"
+    Returns: (agents_correct, agents_wrong)
     """
     cycle_id = position.get("cycle_id")
     if not cycle_id:
-        return
+        return [], []
 
-    entry = position.get("entry_price", 0)
     judge_signal = position.get("judge_signal", "")
 
     # 수익이면 judge_signal이 맞은 것, 손실이면 반대 방향이 맞은 것
     if pnl_pct_lev > 0:
-        correct_signal = judge_signal  # 수익 → judge가 맞음
+        correct_signal = judge_signal
     else:
-        # 손실 → 반대 방향이 정답이었음
         correct_signal = "SELL" if judge_signal == "BUY" else "BUY"
 
     # DB 업데이트: 에이전트별 정답/오답 기록
-    db.update_agent_correctness(cycle_id, correct_signal)
+    agents_correct, agents_wrong = db.update_agent_correctness(cycle_id, correct_signal)
 
     # 거래 결과 업데이트
     pnl_usd = position.get("margin", 0) * (pnl_pct_lev / 100)
@@ -306,8 +303,11 @@ def _update_agent_scores(
 
     logger.info(
         f"📊 에이전트 성과 업데이트: cycle={cycle_id} "
-        f"PnL={pnl_pct_lev:+.2f}% 정답={correct_signal}"
+        f"PnL={pnl_pct_lev:+.2f}% 정답={correct_signal} "
+        f"맞춘={agents_correct} 틀린={agents_wrong}"
     )
+
+    return agents_correct, agents_wrong
 
 
 async def main_loop(system: dict):
@@ -389,7 +389,12 @@ async def main_loop(system: dict):
                                     pnl_pct = 0
                                     pnl_pct_lev = 0
 
-                                # 피드백 기록
+                                # ★ 에이전트 정답/오답 판정 (먼저!)
+                                agents_correct, agents_wrong = _update_agent_scores(
+                                    db, pos, pnl_pct_lev, exit_price
+                                )
+
+                                # 피드백 기록 + 에이전트 가중치 실시간 업데이트
                                 feedback.record_trade({
                                     "symbol": sym,
                                     "side": pos.get("side", "?"),
@@ -402,19 +407,26 @@ async def main_loop(system: dict):
                                     "exit_reason": "manual_or_sltp",
                                     "entry_signals": pos.get("entry_signals", []),
                                     "entry_confidence": pos.get("entry_confidence", 0),
+                                    "agents_correct": agents_correct,
+                                    "agents_wrong": agents_wrong,
                                 })
 
-                                # ★ 에이전트 정답/오답 판정
-                                _update_agent_scores(db, pos, pnl_pct_lev, exit_price)
-
                                 emoji = "💰" if pnl_pct_lev > 0 else "💸"
+                                # 에이전트 가중치 변화 요약
+                                weight_info = ""
+                                if agents_correct:
+                                    weight_info += f"\n✅ 정답: {', '.join(agents_correct[:3])}"
+                                if agents_wrong:
+                                    weight_info += f"\n❌ 오답: {', '.join(agents_wrong[:3])}"
+
                                 await telegram.send(
                                     f"{emoji} <b>포지션 청산 감지</b>\n\n"
                                     f"<b>심볼:</b> {sym}\n"
                                     f"<b>방향:</b> {pos.get('side', '?')}\n"
                                     f"<b>진입:</b> ${entry:,.2f}\n"
                                     f"<b>청산:</b> ${exit_price:,.2f}\n"
-                                    f"<b>PnL:</b> {pnl_pct_lev:+.2f}%\n"
+                                    f"<b>PnL:</b> {pnl_pct_lev:+.2f}%"
+                                    f"{weight_info}\n"
                                     f"<b>누적:</b> {feedback.stats['total_trades']}거래 "
                                     f"승률 {feedback.win_rate:.0%}"
                                 )
@@ -502,7 +514,12 @@ async def main_loop(system: dict):
                                 else:
                                     pnl_pct_lev = 0
 
-                                # 피드백 기록
+                                # ★ 에이전트 정답/오답 판정 (먼저!)
+                                agents_correct, agents_wrong = _update_agent_scores(
+                                    db, pos, pnl_pct_lev, current
+                                )
+
+                                # 피드백 기록 + 에이전트 가중치 실시간 업데이트
                                 fb = feedback.record_trade({
                                     "symbol": pair,
                                     "side": pos.get("side", "?"),
@@ -515,21 +532,26 @@ async def main_loop(system: dict):
                                     "exit_reason": "active_exit",
                                     "entry_signals": pos.get("entry_signals", []),
                                     "entry_confidence": pos.get("entry_confidence", 0),
+                                    "agents_correct": agents_correct,
+                                    "agents_wrong": agents_wrong,
                                 })
 
-                                # ★ 에이전트 정답/오답 판정 + DB 업데이트
-                                _update_agent_scores(
-                                    db, pos, pnl_pct_lev, current
-                                )
-
                                 emoji = "💰" if pnl_pct_lev > 0 else "💸"
+                                # 에이전트 가중치 변화 요약
+                                weight_info = ""
+                                if agents_correct:
+                                    weight_info += f"\n✅ 정답: {', '.join(agents_correct[:3])}"
+                                if agents_wrong:
+                                    weight_info += f"\n❌ 오답: {', '.join(agents_wrong[:3])}"
+
                                 await telegram.send(
                                     f"{emoji} <b>능동 청산</b>\n\n"
                                     f"<b>심볼:</b> {pair}\n"
                                     f"<b>방향:</b> {pos.get('side', '?')}\n"
                                     f"<b>사유:</b> {close_reason}\n"
                                     f"<b>PnL:</b> {pnl_pct_lev:+.2f}%\n"
-                                    f"<b>교훈:</b> {fb.get('lesson', 'N/A')[:150]}\n"
+                                    f"<b>교훈:</b> {fb.get('lesson', 'N/A')[:150]}"
+                                    f"{weight_info}\n"
                                     f"<b>누적:</b> {feedback.stats['total_trades']}거래 "
                                     f"승률 {feedback.win_rate:.0%}"
                                 )
@@ -583,6 +605,23 @@ async def main_loop(system: dict):
                         signal = record.judgment.signal.value
                         confidence = record.judgment.confidence
                         balance = await okx.get_balance()
+
+                        # ── 피드백 기반 진입 필터 ─────────────
+                        fb_adj = feedback.get_adjustments()
+                        min_conf = fb_adj.get("min_confidence_override", 0.4)
+                        if confidence < min_conf:
+                            logger.info(
+                                f"🚫 [{pair}] 확신도 {confidence:.0%} < 최소 {min_conf:.0%} (피드백 조정) → 스킵"
+                            )
+                            continue
+
+                        # 최악 조건 회피
+                        avoid = fb_adj.get("avoid_condition")
+                        if avoid:
+                            entry_signals = filter_result.get("signals", [])
+                            if any(avoid in s for s in entry_signals):
+                                logger.info(f"🚫 [{pair}] 최악 조건 '{avoid}' 감지 → 스킵")
+                                continue
 
                         # 국면별 전략 파라미터 적용
                         regime_params = market_regime.get("strategy_params", {})

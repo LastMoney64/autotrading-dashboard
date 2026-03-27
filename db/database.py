@@ -206,14 +206,28 @@ class Database:
         """, (agent_id, cycle_id, signal, confidence, reasoning))
         self.conn.commit()
 
-    def update_agent_correctness(self, cycle_id: str, correct_signal: str):
-        """거래 결과 확정 후 에이전트 정답 여부 업데이트"""
+    def update_agent_correctness(self, cycle_id: str, correct_signal: str) -> tuple[list[str], list[str]]:
+        """
+        거래 결과 확정 후 에이전트 정답 여부 업데이트
+
+        Returns: (agents_correct, agents_wrong)
+        """
         self.conn.execute("""
             UPDATE agent_performance
             SET was_correct = CASE WHEN signal = ? THEN 1 ELSE 0 END
             WHERE cycle_id = ?
         """, (correct_signal, cycle_id))
         self.conn.commit()
+
+        # 정답/오답 에이전트 리스트 반환
+        rows = self.conn.execute("""
+            SELECT agent_id, was_correct FROM agent_performance
+            WHERE cycle_id = ?
+        """, (cycle_id,)).fetchall()
+
+        agents_correct = [r["agent_id"] for r in rows if r["was_correct"] == 1]
+        agents_wrong = [r["agent_id"] for r in rows if r["was_correct"] == 0]
+        return agents_correct, agents_wrong
 
     def get_agent_stats(self, agent_id: str, last_n: int = 100) -> dict:
         """에이전트 통계"""
