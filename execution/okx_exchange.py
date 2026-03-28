@@ -476,11 +476,9 @@ class OKXExchange:
             if new_tp:
                 await self._set_take_profit(symbol, side, amount, new_tp)
 
-            logger.info(
-                f"TP/SL 업데이트: {symbol} "
-                f"SL=${new_sl:,.2f}" if new_sl else "" +
-                f" TP=${new_tp:,.2f}" if new_tp else ""
-            )
+            sl_str = f"SL=${new_sl:,.2f}" if new_sl else ""
+            tp_str = f"TP=${new_tp:,.2f}" if new_tp else ""
+            logger.info(f"TP/SL 업데이트: {symbol} {sl_str} {tp_str}")
             return True
         except Exception as e:
             logger.warning(f"TP/SL 업데이트 실패 [{symbol}]: {e}")

@@ -800,6 +800,7 @@ async def main_loop(system: dict):
                                     "symbol": pair,
                                     "side": side,
                                     "entry_price": price,
+                                    "size": order.get("amount", 0),  # 계약 수량 (SL 이동/청산용)
                                     "margin": usdt_amount,
                                     "leverage": dynamic_leverage,
                                     "entry_signals": filter_result.get("signals", []),
