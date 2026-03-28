@@ -222,6 +222,9 @@ class IndicatorEngine:
         for key, series in bb.items():
             result[key] = round(float(series.iloc[-1]), 2)
 
+        # 현재가 (ATR % 계산에 필요하므로 먼저 정의)
+        current_price = float(last["close"])
+
         # ATR (절대값 + 현재가 대비 %)
         atr_val = float(cls.atr(df).iloc[-1])
         result["atr"] = round(atr_val, 2)
@@ -242,7 +245,7 @@ class IndicatorEngine:
         result.update(fib)
 
         # 기본 가격 정보
-        result["current_price"] = round(float(last["close"]), 2)
+        result["current_price"] = round(current_price, 2)
         result["volume_24h"] = round(float(df["volume"].tail(24).sum()), 2)
 
         return result
