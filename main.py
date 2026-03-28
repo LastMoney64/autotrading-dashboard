@@ -192,18 +192,20 @@ async def initialize_system():
 
 def _check_position_exit(
     position: dict, filter_result: dict, candles_1h: list[dict]
-) -> tuple[bool, str]:
+) -> tuple[bool, str, dict]:
     """
     열린 포지션 능동 청산 판단 (코드 기반, $0)
-    트레일링 스탑 + 기술적 신호 기반
+    트레일링 스탑 + 기술적 신호 + 수익권 SL 이동
 
-    Returns: (should_close, reason)
+    Returns: (should_close, reason, sl_update)
+        sl_update: {"new_sl": price, "new_stage": N} or {}
     """
     side = position.get("side", "buy")
     is_long = side in ("buy", "long")
     indicators = filter_result.get("indicators", {})
     current_price = indicators.get("current_price", 0)
     entry_price = position.get("entry_price", 0)
+    sl_update = {}  # SL 이동 정보
 
     rsi = indicators.get("rsi", 50)
     adx = indicators.get("adx", 0)
@@ -228,7 +230,7 @@ def _check_position_exit(
             trailing_stop = highest * (1 - trailing_pct)
             if current_price <= trailing_stop and current_price > entry_price:
                 pnl = (current_price - entry_price) / entry_price * 100
-                return True, f"트레일링 스탑 (최고 ${highest:,.0f} → 현재 ${current_price:,.0f}, 수익 {pnl:.1f}% 확보)"
+                return True, f"트레일링 스탑 (최고 ${highest:,.0f} → 현재 ${current_price:,.0f}, 수익 {pnl:.1f}% 확보)", sl_update
         else:
             # 최저가 업데이트
             lowest = position.get("lowest_price", entry_price)
@@ -240,38 +242,75 @@ def _check_position_exit(
             trailing_stop = lowest * (1 + trailing_pct)
             if current_price >= trailing_stop and current_price < entry_price:
                 pnl = (entry_price - current_price) / entry_price * 100
-                return True, f"트레일링 스탑 (최저 ${lowest:,.0f} → 현재 ${current_price:,.0f}, 수익 {pnl:.1f}% 확보)"
+                return True, f"트레일링 스탑 (최저 ${lowest:,.0f} → 현재 ${current_price:,.0f}, 수익 {pnl:.1f}% 확보)", sl_update
+
+    # ── 수익권 SL 이동 (Breakeven → Lock-in) ─────────
+    if current_price and entry_price:
+        atr_value = position.get("atr_value", 0)
+        sl_stage = position.get("sl_stage", 0)
+        fee_be = position.get("fee_breakeven_pct", 0.001)  # 수수료 손익분기 %
+
+        if atr_value and atr_value > 0:
+            if is_long:
+                profit_pct = (current_price - entry_price) / entry_price
+            else:
+                profit_pct = (entry_price - current_price) / entry_price
+
+            # 단계별 SL 이동
+            if sl_stage < 1 and profit_pct >= fee_be * 2:
+                # 1단계: 수수료 × 2 수익 → SL을 진입가 (Breakeven)
+                new_sl = entry_price
+                sl_update = {"new_sl": new_sl, "new_stage": 1, "label": "Breakeven"}
+                position["sl_stage"] = 1
+
+            elif sl_stage < 2 and profit_pct >= atr_value / entry_price:
+                # 2단계: 1 ATR 수익 → SL을 진입가 + 0.5 ATR
+                if is_long:
+                    new_sl = entry_price + atr_value * 0.5
+                else:
+                    new_sl = entry_price - atr_value * 0.5
+                sl_update = {"new_sl": new_sl, "new_stage": 2, "label": "Lock 0.5ATR"}
+                position["sl_stage"] = 2
+
+            elif sl_stage < 3 and profit_pct >= (atr_value * 2) / entry_price:
+                # 3단계: 2 ATR 수익 → SL을 진입가 + 1 ATR
+                if is_long:
+                    new_sl = entry_price + atr_value
+                else:
+                    new_sl = entry_price - atr_value
+                sl_update = {"new_sl": new_sl, "new_stage": 3, "label": "Lock 1ATR"}
+                position["sl_stage"] = 3
 
     # ── 기술적 신호 기반 청산 ─────────────────────────
 
     # 1. 반대 방향 강한 신호 → 즉시 청산
     if is_long and direction == "SELL" and direction_strength >= 3:
-        return True, f"반대 방향 강한 신호 (SELL {direction_strength}개)"
+        return True, f"반대 방향 강한 신호 (SELL {direction_strength}개)", sl_update
     if not is_long and direction == "BUY" and direction_strength >= 3:
-        return True, f"반대 방향 강한 신호 (BUY {direction_strength}개)"
+        return True, f"반대 방향 강한 신호 (BUY {direction_strength}개)", sl_update
 
     # 2. 추세 전환 감지
     if is_long and ema_20 and ema_50 and ema_20 < ema_50 and adx > 30:
-        return True, f"추세 전환 (EMA 역배열 + ADX {adx:.0f})"
+        return True, f"추세 전환 (EMA 역배열 + ADX {adx:.0f})", sl_update
     if not is_long and ema_20 and ema_50 and ema_20 > ema_50 and adx > 30:
-        return True, f"추세 전환 (EMA 정배열 + ADX {adx:.0f})"
+        return True, f"추세 전환 (EMA 정배열 + ADX {adx:.0f})", sl_update
 
     # 3. 과매수/과매도 반전 (수익중일 때만)
     if current_price and entry_price:
         in_profit = (current_price > entry_price) if is_long else (current_price < entry_price)
         if in_profit:
             if is_long and rsi > 80:
-                return True, f"RSI 극단 과매수 ({rsi:.0f}) — 수익 확보"
+                return True, f"RSI 극단 과매수 ({rsi:.0f}) — 수익 확보", sl_update
             if not is_long and rsi < 20:
-                return True, f"RSI 극단 과매도 ({rsi:.0f}) — 수익 확보"
+                return True, f"RSI 극단 과매도 ({rsi:.0f}) — 수익 확보", sl_update
 
     # 4. MACD 반전 + 추세 약화
     if is_long and macd_hist and macd_hist < 0 and rsi > 65:
-        return True, f"MACD 반전 + RSI 고점 — 모멘텀 약화"
+        return True, f"MACD 반전 + RSI 고점 — 모멘텀 약화", sl_update
     if not is_long and macd_hist and macd_hist > 0 and rsi < 35:
-        return True, f"MACD 반전 + RSI 저점 — 모멘텀 약화"
+        return True, f"MACD 반전 + RSI 저점 — 모멘텀 약화", sl_update
 
-    return False, ""
+    return False, "", sl_update
 
 
 def _update_agent_scores(
@@ -492,9 +531,40 @@ async def main_loop(system: dict):
                     # ═══════════════════════════════════════════
                     if pair in known_positions and okx:
                         pos = known_positions[pair]
-                        should_close, close_reason = _check_position_exit(
+                        should_close, close_reason, sl_update = _check_position_exit(
                             pos, filter_result, candles_1h
                         )
+
+                        # ── 수익권 SL 이동 (거래소 주문 업데이트) ──
+                        if sl_update and not should_close:
+                            new_sl = sl_update.get("new_sl")
+                            new_stage = sl_update.get("new_stage", 0)
+                            old_stage = pos.get("sl_stage", 0)
+                            label = sl_update.get("label", "")
+
+                            if new_sl and new_stage > old_stage:
+                                # OKX에 SL 업데이트
+                                size = pos.get("size", 0)
+                                updated = await okx.update_tp_sl(
+                                    pair, pos.get("side", "buy"), size,
+                                    new_sl=new_sl,
+                                )
+                                if updated:
+                                    pos["current_sl"] = new_sl
+                                    pos["sl_stage"] = new_stage
+                                    logger.info(
+                                        f"🔒 [{pair}] SL 이동: "
+                                        f"단계{old_stage}→{new_stage} ({label}) "
+                                        f"SL=${new_sl:,.2f}"
+                                    )
+                                    await telegram.send(
+                                        f"🔒 <b>SL 이동</b>\n\n"
+                                        f"<b>심볼:</b> {pair}\n"
+                                        f"<b>단계:</b> {old_stage} → {new_stage} ({label})\n"
+                                        f"<b>새 SL:</b> ${new_sl:,.2f}\n"
+                                        f"<b>진입가:</b> ${pos.get('entry_price', 0):,.2f}"
+                                    )
+
                         if should_close:
                             logger.info(f"🔄 [{pair}] 능동 청산: {close_reason}")
                             result = await okx.close_position(
@@ -673,23 +743,36 @@ async def main_loop(system: dict):
                                 int(dynamic_leverage * regime_lev_mult)
                             )
 
-                            # 동적 손절/익절 (수수료 반영)
+                            # ── ATR 기반 동적 TP/SL ─────────────────
                             price = market_data.get("ticker", {}).get("last", 0)
-                            sl_base = settings.stop_loss_pct / 100
-                            tp_base = settings.take_profit_pct / 100
-                            lev_factor = 20 / dynamic_leverage
-                            sl_pct = sl_base * lev_factor
+                            atr_pct = filter_result.get("indicators", {}).get("atr_pct", 0)
+                            atr_value = filter_result.get("indicators", {}).get("atr", 0)
 
-                            # TP는 수수료 이상이어야 수익 보장
-                            # 수수료: 진입+청산 = Taker 0.05% × 2 = 0.1%
+                            # 수수료 손익분기
                             fee_breakeven_pct = (settings.fee_taker_pct * 2) / 100
-                            tp_pct = max(tp_base * lev_factor, fee_breakeven_pct * 3)  # 수수료의 3배 이상
+
+                            if atr_pct and atr_pct > 0:
+                                # ATR 기반: SL = 1.5 ATR, TP = 3 ATR (손익비 2:1)
+                                sl_pct = (atr_pct / 100) * 1.5
+                                tp_pct = (atr_pct / 100) * 3.0
+
+                                # 최소 TP = 수수료의 3배 (수익 보장)
+                                tp_pct = max(tp_pct, fee_breakeven_pct * 3)
+                                # 최소 SL = 수수료의 2배 (너무 가까우면 노이즈에 청산됨)
+                                sl_pct = max(sl_pct, fee_breakeven_pct * 2)
+                            else:
+                                # ATR 없으면 기존 방식 폴백
+                                lev_factor = 20 / dynamic_leverage
+                                sl_pct = (settings.stop_loss_pct / 100) * lev_factor
+                                tp_pct = max(
+                                    (settings.take_profit_pct / 100) * lev_factor,
+                                    fee_breakeven_pct * 3,
+                                )
 
                             logger.info(
-                                f"[{pair}] 수수료 분석: "
-                                f"Taker {settings.fee_taker_pct}% × 2 × {dynamic_leverage}x = "
-                                f"마진 대비 {fee_breakeven_pct * dynamic_leverage * 100:.1f}% | "
-                                f"TP {tp_pct*100:.2f}% > 손익분기"
+                                f"[{pair}] TP/SL: ATR={atr_value:.0f}({atr_pct:.3f}%) "
+                                f"SL={sl_pct*100:.3f}% TP={tp_pct*100:.3f}% "
+                                f"손익비={tp_pct/sl_pct:.1f}:1"
                             )
 
                             if side == "buy":
@@ -729,6 +812,13 @@ async def main_loop(system: dict):
                                     "highest_price": price if side == "buy" else None,
                                     "lowest_price": price if side == "sell" else None,
                                     "regime": market_regime.get("regime_label", ""),
+                                    # ATR 기반 SL 이동용
+                                    "atr_value": atr_value,
+                                    "atr_pct": atr_pct,
+                                    "sl_stage": 0,  # 0=초기, 1=BE, 2=lock1, 3=lock2
+                                    "current_sl": stop_loss,
+                                    "current_tp": take_profit,
+                                    "fee_breakeven_pct": fee_breakeven_pct,
                                 }
                                 logger.info(
                                     f"✅ 주문 체결: {side.upper()} {pair} "

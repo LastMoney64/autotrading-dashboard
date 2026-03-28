@@ -431,6 +431,61 @@ class OKXExchange:
         except Exception as e:
             logger.warning(f"익절 설정 실패 [{symbol}]: {e}")
 
+    # ── TP/SL 동적 수정 ────────────────────────────────
+
+    async def cancel_tp_sl(self, symbol: str) -> bool:
+        """기존 TP/SL 조건부 주문 취소"""
+        try:
+            # OKX algo/conditional orders 조회
+            open_orders = await self.exchange.fetch_open_orders(symbol)
+            cancelled = 0
+            for order in open_orders:
+                params = order.get("info", {})
+                order_type = params.get("ordType", "")
+                # conditional/algo 주문 (SL/TP)
+                if order_type in ("conditional", "oco", "trigger") or \
+                   order.get("stopPrice") or \
+                   params.get("slTriggerPx") or params.get("tpTriggerPx"):
+                    try:
+                        await self.exchange.cancel_order(order["id"], symbol)
+                        cancelled += 1
+                    except Exception:
+                        pass
+
+            if cancelled > 0:
+                logger.info(f"TP/SL 취소: {symbol} ({cancelled}건)")
+            return True
+        except Exception as e:
+            logger.warning(f"TP/SL 취소 실패 [{symbol}]: {e}")
+            return False
+
+    async def update_tp_sl(
+        self, symbol: str, side: str, amount: float,
+        new_sl: float = None, new_tp: float = None,
+    ) -> bool:
+        """
+        TP/SL 업데이트 (취소 → 재설정)
+
+        OKX는 조건부 주문 수정이 복잡하므로 취소 후 재설정
+        """
+        try:
+            await self.cancel_tp_sl(symbol)
+
+            if new_sl:
+                await self._set_stop_loss(symbol, side, amount, new_sl)
+            if new_tp:
+                await self._set_take_profit(symbol, side, amount, new_tp)
+
+            logger.info(
+                f"TP/SL 업데이트: {symbol} "
+                f"SL=${new_sl:,.2f}" if new_sl else "" +
+                f" TP=${new_tp:,.2f}" if new_tp else ""
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"TP/SL 업데이트 실패 [{symbol}]: {e}")
+            return False
+
     # ── 유틸리티 ───────────────────────────────────────
 
     async def get_account_summary(self) -> dict:

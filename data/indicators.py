@@ -222,8 +222,10 @@ class IndicatorEngine:
         for key, series in bb.items():
             result[key] = round(float(series.iloc[-1]), 2)
 
-        # ATR
-        result["atr"] = round(float(cls.atr(df).iloc[-1]), 2)
+        # ATR (절대값 + 현재가 대비 %)
+        atr_val = float(cls.atr(df).iloc[-1])
+        result["atr"] = round(atr_val, 2)
+        result["atr_pct"] = round(atr_val / current_price * 100, 4) if current_price else 0
 
         # OBV
         result["obv"] = round(float(cls.obv(df).iloc[-1]), 2)
