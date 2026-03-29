@@ -264,12 +264,16 @@ def _check_position_exit(
                 position["sl_stage"] = 1
 
             elif sl_stage < 2 and profit_pct >= atr_value / entry_price:
-                # 2단계: 1 ATR 수익 → SL을 진입가 + 0.5 ATR
+                # 2단계: 1 ATR 수익 → SL 이동 + 부분 익절 50%
                 if is_long:
                     new_sl = entry_price + atr_value * 0.5
                 else:
                     new_sl = entry_price - atr_value * 0.5
-                sl_update = {"new_sl": new_sl, "new_stage": 2, "label": "Lock 0.5ATR"}
+                sl_update = {
+                    "new_sl": new_sl, "new_stage": 2, "label": "Lock 0.5ATR",
+                    "partial_tp": True,  # 부분 익절 신호
+                    "partial_pct": 50,   # 50% 청산
+                }
                 position["sl_stage"] = 2
 
             elif sl_stage < 3 and profit_pct >= (atr_value * 2) / entry_price:
@@ -612,6 +616,31 @@ async def main_loop(system: dict):
                                         f"<b>진입가:</b> ${pos.get('entry_price', 0):,.2f}"
                                     )
 
+                                    # ── 부분 익절 (50% 청산) ──────────
+                                    if sl_update.get("partial_tp") and not pos.get("partial_closed"):
+                                        partial_pct = sl_update.get("partial_pct", 50)
+                                        partial_size = size * (partial_pct / 100)
+                                        if partial_size > 0:
+                                            try:
+                                                await okx.close_position(
+                                                    pair, pos.get("side", "buy"), partial_size
+                                                )
+                                                pos["partial_closed"] = True
+                                                pos["size"] = size - partial_size
+                                                logger.info(
+                                                    f"💰 [{pair}] 부분 익절: "
+                                                    f"{partial_pct}% 청산 (수익 확보), "
+                                                    f"나머지 {100-partial_pct}% 트레일링"
+                                                )
+                                                await telegram.send(
+                                                    f"💰 <b>부분 익절 {partial_pct}%</b>\n\n"
+                                                    f"<b>심볼:</b> {pair}\n"
+                                                    f"<b>수익 확보:</b> 포지션의 절반 청산\n"
+                                                    f"<b>나머지:</b> 트레일링 스탑으로 수익 극대화"
+                                                )
+                                            except Exception as e:
+                                                logger.warning(f"부분 익절 실패 [{pair}]: {e}")
+
                         if should_close:
                             logger.info(f"🔄 [{pair}] 능동 청산: {close_reason}")
                             result = await okx.close_position(
@@ -794,12 +823,22 @@ async def main_loop(system: dict):
                         # 국면별 포지션 크기 조정
                         position_pct *= regime_size_mult
 
-                        # 피드백 기반 포지션 조정 (연패 시 축소)
-                        fb_adj = feedback.get_adjustments()
+                        # 피드백 기반 포지션 조정 (연패복구/연승공격)
                         position_multiplier = fb_adj.get("position_size_multiplier", 1.0)
                         position_pct *= position_multiplier
-                        if position_multiplier < 1:
-                            logger.info(f"⚠️ 피드백 조정: 포지션 {position_multiplier:.0%} ({fb_adj.get('reason', '')})")
+
+                        # 시간대별 포지션 보정
+                        session_mult = fb_adj.get("session_multiplier", 1.0)
+                        position_pct *= session_mult
+
+                        if position_multiplier != 1.0 or session_mult != 1.0:
+                            reason = fb_adj.get("reason", "")
+                            session = fb_adj.get("session", "")
+                            logger.info(
+                                f"📊 [{pair}] 포지션 조정: "
+                                f"x{position_multiplier:.1f}({reason}) "
+                                f"세션 x{session_mult:.1f}({session})"
+                            )
 
                         usdt_amount = max(0, balance["free"] * (position_pct / 100))
 

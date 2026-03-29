@@ -258,35 +258,87 @@ class TradeFeedback:
         }
 
     def get_adjustments(self) -> dict:
-        """현재 상태 기반 전략 조정값"""
+        """현재 상태 기반 전략 조정값 (연패복구/연승공격/시간대 포함)"""
         adj = {}
+        cons_losses = self.stats["consecutive_losses"]
+        cons_wins = self._get_consecutive_wins()
 
-        # 연속 손실 시 포지션 축소
-        if self.stats["consecutive_losses"] >= 3:
-            adj["position_size_multiplier"] = 0.5
-            adj["reason"] = f"연속 {self.stats['consecutive_losses']}패 — 포지션 50% 축소"
-        elif self.stats["consecutive_losses"] >= 5:
-            adj["position_size_multiplier"] = 0.25
-            adj["reason"] = f"연속 {self.stats['consecutive_losses']}패 — 포지션 75% 축소"
+        # ── 1. 연패 후 복구 배팅 (마틴게일 라이트) ────────
+        # 연패 후 높은 확신도 거래 → 포지션 키워서 복구
+        if cons_losses >= 2:
+            adj["position_size_multiplier"] = 1.5  # 2연패 → 다음 1.5배
+            adj["recovery_mode"] = True
+            adj["reason"] = f"연속 {cons_losses}패 → 복구 배팅 1.5x (높은 확신 필요)"
+            adj["min_confidence_override"] = 0.6  # 복구 배팅은 확신 높을 때만
+        elif cons_losses >= 4:
+            adj["position_size_multiplier"] = 1.0  # 4연패 → 원래대로 (무리 X)
+            adj["recovery_mode"] = False
+            adj["reason"] = f"연속 {cons_losses}패 → 표준 포지션 (냉정하게)"
+            adj["min_confidence_override"] = 0.6
         else:
             adj["position_size_multiplier"] = 1.0
+            adj["recovery_mode"] = False
 
-        # 승률 기반 확신도 임계값 조정
+        # ── 2. 연승 시 공격 강화 ─────────────────────────
+        if cons_wins >= 3:
+            adj["position_size_multiplier"] = 1.3  # 3연승 → 1.3배
+            adj["streak_bonus"] = True
+            adj["reason"] = f"🔥 연속 {cons_wins}승 → 공격 강화 1.3x"
+        elif cons_wins >= 5:
+            adj["position_size_multiplier"] = 1.5  # 5연승 → 1.5배
+            adj["streak_bonus"] = True
+            adj["reason"] = f"🔥🔥 연속 {cons_wins}승 → 공격 강화 1.5x"
+
+        # ── 3. 시간대별 확신도 보정 ──────────────────────
+        from datetime import datetime, timezone, timedelta
+        kst = timezone(timedelta(hours=9))
+        hour_kst = datetime.now(kst).hour
+
+        if 3 <= hour_kst < 7:
+            # 새벽 3~7시 KST: 거래량 적음, 페이크 많음
+            adj["session_multiplier"] = 0.7
+            adj["session"] = "아시아 새벽 (저유동성)"
+        elif 16 <= hour_kst < 18:
+            # 유럽장 개장 (16~18시 KST)
+            adj["session_multiplier"] = 1.1
+            adj["session"] = "유럽 개장"
+        elif 22 <= hour_kst or hour_kst < 1:
+            # 뉴욕장 개장 (22~01시 KST): 변동성 최대
+            adj["session_multiplier"] = 1.2
+            adj["session"] = "뉴욕 개장 (고변동성)"
+        else:
+            adj["session_multiplier"] = 1.0
+            adj["session"] = "일반"
+
+        # ── 4. 부분 익절 설정 ────────────────────────────
+        adj["partial_tp_enabled"] = True
+        adj["partial_tp_pct"] = 50  # 1 ATR 수익 시 50% 청산
+
+        # ── 5. 승률 기반 확신도 조정 ─────────────────────
         if self.stats["total_trades"] >= 15:
             wr = self.win_rate
-            if wr < 0.35:
-                adj["min_confidence_override"] = 0.6  # 더 엄격
-            elif wr < 0.45:
+            if wr < 0.35 and "min_confidence_override" not in adj:
+                adj["min_confidence_override"] = 0.6
+            elif wr < 0.45 and "min_confidence_override" not in adj:
                 adj["min_confidence_override"] = 0.5
-            # 승률 좋으면 기본값 유지
 
-        # 최악 조건 필터링
+        # ── 6. 최악 조건 필터링 ──────────────────────────
         worst = self._get_worst_condition()
         if worst and worst[1] < 0.3 and worst[2] >= 5:
             adj["avoid_condition"] = worst[0]
             adj["avoid_reason"] = f"{worst[0]} 조건 승률 {worst[1]:.0%} ({worst[2]}거래) — 회피"
 
         return adj
+
+    def _get_consecutive_wins(self) -> int:
+        """현재 연승 횟수"""
+        count = 0
+        for trade in reversed(self.trade_history):
+            if trade.get("is_win"):
+                count += 1
+            else:
+                break
+        return count
 
     def get_stats(self) -> dict:
         """현재 통계"""
