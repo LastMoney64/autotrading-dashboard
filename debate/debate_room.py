@@ -135,22 +135,24 @@ class DebateRoom:
     # ══════════════════════════════════════════════════════
 
     async def _hybrid_judge(self, market_data: dict, record: DebateRecord) -> JudgmentResult:
-        """코드로 판결 — 에이전트 가중치 반영 (잘하는 에이전트 의견 우선)"""
-        # 확신도 30% 이하인 에이전트 제외 (데이터 없는 에이전트)
-        valid_analyses = [a for a in record.analyses if a.confidence > 0.3]
-        if not valid_analyses:
-            valid_analyses = record.analyses
-
+        """코드로 판결 — SignalFilter 방향 존중 + 에이전트 가중치 반영"""
+        # 전체 분석 사용 (약한 신호도 포함 — 필터는 SignalFilter가 이미 했음)
+        valid_analyses = record.analyses
         if not valid_analyses:
             return JudgmentResult(
                 signal=Signal.HOLD, confidence=0.2, position_size_pct=0.0,
                 reasoning="분석 결과 없음"
             )
 
+        # ── SignalFilter 방향 힌트 (이미 검증된 강한 신호) ──
+        pre_filter = market_data.get("pre_filter", {})
+        filter_direction = pre_filter.get("direction_hint", "NEUTRAL")
+        filter_strength = pre_filter.get("direction_strength", 0)
+        filter_signal_count = pre_filter.get("signal_count", 0)
+
         # ── 에이전트 가중치 로드 ──────────────────────────
         weights = self.registry.get_normalized_weights()
 
-        # 가중치 적용: 잘하는 에이전트의 의견에 더 높은 가중치
         weighted_buy = 0.0
         weighted_sell = 0.0
         weighted_hold = 0.0
@@ -158,7 +160,7 @@ class DebateRoom:
 
         for a in valid_analyses:
             w = weights.get(a.agent_id, 1.0 / max(len(weights), 1))
-            score = a.confidence * w  # 확신도 × 가중치
+            score = a.confidence * w
             total_weight += w
 
             if a.signal == Signal.BUY:
@@ -168,7 +170,6 @@ class DebateRoom:
             else:
                 weighted_hold += score
 
-        # 정규화
         if total_weight > 0:
             weighted_buy /= total_weight
             weighted_sell /= total_weight
@@ -178,22 +179,42 @@ class DebateRoom:
         sell_count = sum(1 for a in valid_analyses if a.signal == Signal.SELL)
         total = len(valid_analyses)
 
-        # ── 가중치 기반 판결 ──────────────────────────────
-        if weighted_buy > weighted_sell and weighted_buy > weighted_hold:
-            signal = Signal.BUY
-            confidence = min(0.9, weighted_buy * 1.3 + (buy_count / max(total, 1)) * 0.15)
-        elif weighted_sell > weighted_buy and weighted_sell > weighted_hold:
+        # ── 판결 (SignalFilter 방향 존중) ──────────────────
+        # SignalFilter가 이미 강한 방향 신호를 감지했으므로
+        # 에이전트들이 애매해도 방향은 신뢰한다
+
+        # 기본: 에이전트 투표 기반
+        if weighted_sell > weighted_buy and weighted_sell > weighted_hold:
             signal = Signal.SELL
             confidence = min(0.9, weighted_sell * 1.3 + (sell_count / max(total, 1)) * 0.15)
-        elif buy_count > sell_count:
+        elif weighted_buy > weighted_sell and weighted_buy > weighted_hold:
             signal = Signal.BUY
-            confidence = min(0.7, weighted_buy * 1.1)
+            confidence = min(0.9, weighted_buy * 1.3 + (buy_count / max(total, 1)) * 0.15)
         elif sell_count > buy_count:
             signal = Signal.SELL
-            confidence = min(0.7, weighted_sell * 1.1)
+            confidence = min(0.7, weighted_sell * 1.1 + 0.1)
+        elif buy_count > sell_count:
+            signal = Signal.BUY
+            confidence = min(0.7, weighted_buy * 1.1 + 0.1)
         else:
-            signal = Signal.HOLD
-            confidence = max(weighted_buy, weighted_sell) * 0.4
+            # 에이전트 투표 동점 → SignalFilter 방향 따라감
+            if filter_direction == "BUY" and filter_strength >= 2:
+                signal = Signal.BUY
+                base = max(weighted_buy, 0.3)
+                confidence = min(0.7, base + filter_strength * 0.05)
+            elif filter_direction == "SELL" and filter_strength >= 2:
+                signal = Signal.SELL
+                base = max(weighted_sell, 0.3)
+                confidence = min(0.7, base + filter_strength * 0.05)
+            else:
+                signal = Signal.HOLD
+                confidence = max(weighted_buy, weighted_sell) * 0.5
+
+        # ── SignalFilter 강도 보너스 ──────────────────────
+        # 신호 4개 이상이면 확신도 추가 부스트
+        if signal != Signal.HOLD and filter_signal_count >= 3:
+            bonus = min(0.15, (filter_signal_count - 2) * 0.05)
+            confidence = min(0.9, confidence + bonus)
 
         # 포지션 사이징
         if signal != Signal.HOLD:
