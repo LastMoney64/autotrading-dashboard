@@ -370,7 +370,7 @@ async def main_loop(system: dict):
     # 일일 손실 한도 추적
     daily_pnl = 0.0
     daily_trade_count = 0
-    daily_max_trades = 6  # 하루 최대 6거래 (오버트레이딩 방지)
+    daily_max_trades = 999  # 거래 제한 없음
     from datetime import date as _date
     current_date = _date.today()
 
