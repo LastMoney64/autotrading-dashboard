@@ -472,9 +472,21 @@ async def main_loop(system: dict):
                                 del known_positions[sym]
                                 trades_since_evolution += 1
 
-                        # 새 포지션 업데이트
+                        # 새 포지션 업데이트 (커스텀 필드 보존)
                         for pos in current_positions:
-                            known_positions[pos["symbol"]] = pos
+                            sym = pos["symbol"]
+                            if sym in known_positions:
+                                # 기존 커스텀 필드 유지 + OKX 데이터만 업데이트
+                                existing = known_positions[sym]
+                                existing.update({
+                                    "size": pos.get("size", existing.get("size", 0)),
+                                    "mark_price": pos.get("mark_price", 0),
+                                    "unrealized_pnl": pos.get("unrealized_pnl", 0),
+                                    "liquidation_price": pos.get("liquidation_price", 0),
+                                })
+                            else:
+                                # 외부에서 열린 포지션 (수동 등)
+                                known_positions[sym] = pos
 
                     except Exception as e:
                         logger.debug(f"포지션 동기화 에러: {e}")
@@ -674,6 +686,30 @@ async def main_loop(system: dict):
                     ):
                         signal = record.judgment.signal.value
                         confidence = record.judgment.confidence
+
+                        # ── 중복 포지션 차단 ─────────────────
+                        # 같은 페어에 이미 포지션이 있으면 새 포지션 안 열음
+                        if pair in known_positions:
+                            existing = known_positions[pair]
+                            existing_side = existing.get("side", "")
+                            new_side = "buy" if signal == "BUY" else "sell"
+                            if existing_side == new_side:
+                                logger.info(f"🚫 [{pair}] 이미 {existing_side} 포지션 있음 → 스킵")
+                            else:
+                                logger.info(
+                                    f"🚫 [{pair}] 반대 방향 포지션 차단: "
+                                    f"기존={existing_side}, 신규={new_side} → 양방향 금지"
+                                )
+                            continue
+
+                        # ── 동시 포지션 수 제한 ──────────────
+                        if len(known_positions) >= settings.max_concurrent_positions:
+                            logger.info(
+                                f"🚫 [{pair}] 최대 동시 포지션 "
+                                f"{settings.max_concurrent_positions}개 도달 → 스킵"
+                            )
+                            continue
+
                         balance = await okx.get_balance()
 
                         # ── 피드백 기반 진입 필터 ─────────────
