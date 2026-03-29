@@ -367,6 +367,13 @@ async def main_loop(system: dict):
     paused = False
     known_positions: dict[str, dict] = {}  # symbol → position 추적
 
+    # 일일 손실 한도 추적
+    daily_pnl = 0.0
+    daily_trade_count = 0
+    daily_max_trades = 6  # 하루 최대 6거래 (오버트레이딩 방지)
+    from datetime import date as _date
+    current_date = _date.today()
+
     # pause/resume 콜백
     def on_pause():
         nonlocal paused
@@ -397,6 +404,32 @@ async def main_loop(system: dict):
                 if paused:
                     await asyncio.sleep(2)
                     continue
+
+                # ── 일일 리셋 ────────────────────────────
+                today = _date.today()
+                if today != current_date:
+                    logger.info(f"📅 일일 리셋: PnL {daily_pnl:+.2f}%, 거래 {daily_trade_count}회")
+                    daily_pnl = 0.0
+                    daily_trade_count = 0
+                    current_date = today
+
+                # ── 일일 손실 한도 체크 ──────────────────
+                if daily_pnl <= -settings.max_drawdown_pct:
+                    if scan_count % 60 == 0:
+                        logger.warning(
+                            f"🛑 일일 손실 한도 도달: {daily_pnl:+.2f}% "
+                            f"(한도 -{settings.max_drawdown_pct}%) → 매매 중지"
+                        )
+                    await asyncio.sleep(settings.decision_interval_seconds)
+                    scan_count += 1
+                    continue
+
+                # ── 일일 거래 횟수 제한 ──────────────────
+                if daily_trade_count >= daily_max_trades and not known_positions:
+                    if scan_count % 60 == 0:
+                        logger.info(
+                            f"⏸️ 일일 거래 한도 {daily_max_trades}회 도달 → 신규 진입 중지"
+                        )
 
                 # ═══════════════════════════════════════════
                 # STAGE 0: 포지션 동기화 (OKX 실제 상태 확인)
@@ -471,6 +504,8 @@ async def main_loop(system: dict):
                                 )
                                 del known_positions[sym]
                                 trades_since_evolution += 1
+                                daily_trade_count += 1
+                                daily_pnl += pnl_pct_lev
 
                         # 새 포지션 업데이트 (커스텀 필드 보존)
                         for pos in current_positions:
@@ -639,6 +674,8 @@ async def main_loop(system: dict):
                                 )
                                 del known_positions[pair]
                                 trades_since_evolution += 1
+                                daily_trade_count += 1
+                                daily_pnl += pnl_pct_lev
 
                     if not filter_result["should_trigger"]:
                         # 신호 없음 → AI 호출 안 함 → 비용 $0
@@ -702,6 +739,11 @@ async def main_loop(system: dict):
                                 )
                             continue
 
+                        # ── 일일 거래 횟수 제한 ──────────────
+                        if daily_trade_count >= daily_max_trades:
+                            logger.info(f"🚫 [{pair}] 일일 거래 한도 {daily_max_trades}회 → 스킵")
+                            continue
+
                         # ── 동시 포지션 수 제한 ──────────────
                         if len(known_positions) >= settings.max_concurrent_positions:
                             logger.info(
@@ -714,7 +756,10 @@ async def main_loop(system: dict):
 
                         # ── 피드백 기반 진입 필터 ─────────────
                         fb_adj = feedback.get_adjustments()
-                        min_conf = fb_adj.get("min_confidence_override", 0.4)
+                        min_conf = fb_adj.get(
+                            "min_confidence_override",
+                            settings.min_confidence_threshold  # 기본 0.55
+                        )
                         if confidence < min_conf:
                             logger.info(
                                 f"🚫 [{pair}] 확신도 {confidence:.0%} < 최소 {min_conf:.0%} (피드백 조정) → 스킵"

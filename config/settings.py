@@ -30,20 +30,20 @@ class Settings:
     timeframes: list[str] = field(default_factory=lambda: ["15m", "1h", "4h"])
     decision_interval_seconds: int = 60  # 의사결정 주기
 
-    # ── 리스크 관리 (고레버리지 전략) ─────────────────────
-    max_position_risk_pct: float = 1.0       # 거래당 최대 리스크 % (고레버 → 작게)
-    max_drawdown_pct: float = 30.0           # 최대 드로다운 %
-    max_concurrent_positions: int = 4        # 최대 동시 포지션 (페어당 2개)
-    min_risk_reward_ratio: float = 2.5       # 최소 손익비 (고레버 → 높게)
-    stop_loss_pct: float = 1.5              # 손절 % (레버리지 적용 전 가격 기준)
-    take_profit_pct: float = 4.0            # 익절 % (손절의 ~2.5배)
+    # ── 리스크 관리 (공격적 + 스마트) ─────────────────────
+    max_position_risk_pct: float = 1.0       # 거래당 최대 리스크 %
+    max_drawdown_pct: float = 25.0           # 일일 최대 드로다운 %
+    max_concurrent_positions: int = 3        # 최대 동시 포지션
+    min_risk_reward_ratio: float = 2.0       # 최소 손익비
+    stop_loss_pct: float = 1.5              # 손절 % (ATR 폴백용)
+    take_profit_pct: float = 4.0            # 익절 % (ATR 폴백용)
 
     # ── 수수료 ────────────────────────────────────────
     fee_maker_pct: float = 0.02             # Maker 수수료 0.02%
     fee_taker_pct: float = 0.05             # Taker 수수료 0.05% (시장가)
 
     # ── 에이전트 설정 ───────────────────────────────────
-    min_confidence_threshold: float = 0.4    # 최소 확신도 (적극적 매매)
+    min_confidence_threshold: float = 0.45   # 최소 확신도 (공격적이되 너무 약한 신호는 제외)
     debate_rounds: int = 0                   # 토론 라운드 수 (0=분석만, 비용 절감)
     max_agents: int = 20                     # 최대 에이전트 수
 
