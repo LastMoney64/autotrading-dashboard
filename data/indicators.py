@@ -146,6 +146,61 @@ class IndicatorEngine:
         cum_vol = df["volume"].cumsum()
         return cum_tp_vol / (cum_vol + 1e-10)
 
+    # ── 다이버전스 감지 ─────────────────────────────────
+
+    @staticmethod
+    def detect_divergence(df: pd.DataFrame, lookback: int = 20) -> dict:
+        """
+        RSI 다이버전스 감지
+
+        - 강세 다이버전스: 가격 신저가 + RSI 올라감 → BUY 신호
+        - 약세 다이버전스: 가격 신고가 + RSI 내려감 → SELL 신호
+        """
+        if len(df) < lookback + 5:
+            return {"bullish": False, "bearish": False, "type": None}
+
+        close = df["close"].values
+        rsi_series = IndicatorEngine.rsi(df)
+        rsi_vals = rsi_series.values
+
+        recent = slice(-lookback, None)
+        price_recent = close[recent]
+        rsi_recent = rsi_vals[recent]
+
+        # 유효 데이터 체크
+        if len(price_recent) < 10 or any(pd.isna(rsi_recent[-10:])):
+            return {"bullish": False, "bearish": False, "type": None}
+
+        # 최근 구간을 절반으로 나눠서 비교
+        half = len(price_recent) // 2
+        price_first = price_recent[:half]
+        price_second = price_recent[half:]
+        rsi_first = rsi_recent[:half]
+        rsi_second = rsi_recent[half:]
+
+        price_low1 = float(np.min(price_first))
+        price_low2 = float(np.min(price_second))
+        price_high1 = float(np.max(price_first))
+        price_high2 = float(np.max(price_second))
+        rsi_low1 = float(np.nanmin(rsi_first))
+        rsi_low2 = float(np.nanmin(rsi_second))
+        rsi_high1 = float(np.nanmax(rsi_first))
+        rsi_high2 = float(np.nanmax(rsi_second))
+
+        # 강세 다이버전스: 가격 더 낮은데 RSI는 더 높음
+        bullish = price_low2 < price_low1 and rsi_low2 > rsi_low1 + 3
+
+        # 약세 다이버전스: 가격 더 높은데 RSI는 더 낮음
+        bearish = price_high2 > price_high1 and rsi_high2 < rsi_high1 - 3
+
+        div_type = None
+        if bullish:
+            div_type = "bullish"
+        elif bearish:
+            div_type = "bearish"
+
+        return {"bullish": bullish, "bearish": bearish, "type": div_type}
+
     # ── 지지/저항 ───────────────────────────────────────
 
     @staticmethod
@@ -235,6 +290,10 @@ class IndicatorEngine:
 
         # VWAP
         result["vwap"] = round(float(cls.vwap(df).iloc[-1]), 2)
+
+        # Divergence (RSI 다이버전스)
+        div = cls.detect_divergence(df)
+        result["divergence"] = div
 
         # Support/Resistance
         sr = cls.support_resistance(df)

@@ -100,12 +100,17 @@ async def initialize_system():
     print(f"  Evolution Interval: 매 {settings.weight_update_interval}거래")
     print("=" * 60)
 
+    # 비활성화할 에이전트 (가짜 데이터로 신호 희석시키는 에이전트)
+    DISABLED_AGENTS = {"whale", "copytrade", "onchain"}
+
     # 에이전트 등록
     for agent_id, config in AGENT_CONFIGS.items():
+        if agent_id in DISABLED_AGENTS:
+            print(f"  [x] {config.name} — 비활성화 (실제 데이터 없음)")
+            continue
         cls = AGENT_CLASSES.get(agent_id)
         if cls:
             agent = cls(config)
-            # MemoryAgent에 메모리 주입
             if isinstance(agent, MemoryAgent):
                 agent.set_memory(episode_memory, pattern_memory)
             registry.register(agent)

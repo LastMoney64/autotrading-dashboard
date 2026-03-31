@@ -32,8 +32,8 @@ class SignalFilter:
         self.volume_spike_multiplier = volume_spike_multiplier
         self.min_signals_to_trigger = min_signals_to_trigger
 
-        # 쿨다운: 30분 (초 단위)
-        self._cooldown_seconds = 1800
+        # 쿨다운: 15분 (초 단위)
+        self._cooldown_seconds = 900
         self._last_trigger_time: dict[str, float] = {}
 
     def check(
@@ -165,6 +165,35 @@ class SignalFilter:
                 elif align_dir == "SELL":
                     signals.append(f"TF정렬 SELL ({market_regime.get('tf_signals', {})})")
                     sell_signals += 1
+
+        # ── 10. RSI 다이버전스 (강력한 반전 신호) ─────────
+        div = indicators.get("divergence", {})
+        if div.get("bullish"):
+            signals.append("RSI 강세 다이버전스 (가격↓ RSI↑)")
+            buy_signals += 2  # 다이버전스는 강한 신호 → 2점
+        elif div.get("bearish"):
+            signals.append("RSI 약세 다이버전스 (가격↑ RSI↓)")
+            sell_signals += 2
+
+        # ── 11. 가격 위치 컨플루언스 ─────────────────────
+        # 지지선/저항선 근처에서 진입하면 승률 UP
+        support_levels = indicators.get("support_levels", [])
+        resistance_levels = indicators.get("resistance_levels", [])
+        has_price_location = False
+
+        if price and support_levels:
+            nearest_support = min(support_levels, key=lambda s: abs(price - s))
+            if abs(price - nearest_support) / price < 0.005:  # 0.5% 이내
+                signals.append(f"지지선 근처 (${nearest_support:,.0f})")
+                buy_signals += 1
+                has_price_location = True
+
+        if price and resistance_levels:
+            nearest_resistance = min(resistance_levels, key=lambda r: abs(price - r))
+            if abs(price - nearest_resistance) / price < 0.005:
+                signals.append(f"저항선 근처 (${nearest_resistance:,.0f})")
+                sell_signals += 1
+                has_price_location = True
 
         # ── 판정 ───────────────────────────────────────
         signal_count = len(signals)
