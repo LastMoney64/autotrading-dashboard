@@ -46,6 +46,32 @@ class DebateRoom:
             record.add_analysis(a)
 
         if not analyses:
+            # 에이전트 전원 실패해도 SignalFilter가 감지한 신호가 있으면 진행
+            pre_filter = market_data.get("pre_filter", {})
+            direction = pre_filter.get("direction_hint", "NEUTRAL")
+            strength = pre_filter.get("direction_strength", 0)
+
+            if direction != "NEUTRAL" and strength >= 2:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"에이전트 전원 실패 — SignalFilter 방향({direction})으로 폴백 판결"
+                )
+                signal = Signal.BUY if direction == "BUY" else Signal.SELL
+                confidence = min(0.6, 0.3 + strength * 0.05)
+                judgment = JudgmentResult(
+                    signal=signal, confidence=confidence, position_size_pct=1.0,
+                    reasoning=f"에이전트 전원 실패 → SignalFilter 폴백 ({direction}, 신호 {strength}개)"
+                )
+                record.set_judgment(judgment)
+                record.set_moderator_summary(f"폴백: {direction} (에이전트 응답 없음)")
+                risk = self._code_based_risk(market_data, record)
+                record.set_risk_review(risk)
+                if risk.approved and signal != Signal.HOLD:
+                    record.finalize("EXECUTED")
+                else:
+                    record.finalize("VETOED" if not risk.approved else "HOLD")
+                return record
+
             record.finalize("SKIPPED", {"reason": "No analysis results"})
             return record
 
@@ -93,7 +119,9 @@ class DebateRoom:
     async def _safe_analyze(self, agent: BaseAgent, market_data: dict) -> Optional[AnalysisResult]:
         try:
             return await asyncio.wait_for(agent.analyze(market_data), timeout=self.analysis_timeout)
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"에이전트 분석 실패 [{agent.agent_id}]: {e}")
             return None
 
     # ══════════════════════════════════════════════════════
