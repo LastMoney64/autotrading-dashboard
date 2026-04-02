@@ -244,6 +244,11 @@ class IndicatorEngine:
     @classmethod
     def compute_all(cls, df: pd.DataFrame) -> dict:
         """모든 지표를 한 번에 계산하여 딕셔너리로 반환"""
+        # list → DataFrame 자동 변환
+        if isinstance(df, list):
+            df = pd.DataFrame(df)
+        if len(df) < 5:
+            return {"current_price": 0}
         last = df.iloc[-1]
         result = {}
 
@@ -310,8 +315,10 @@ class IndicatorEngine:
         return result
 
     @classmethod
-    def compute_for_agent(cls, df: pd.DataFrame, indicator_names: list[str]) -> dict:
+    def compute_for_agent(cls, df, indicator_names: list[str]) -> dict:
         """특정 에이전트가 필요한 지표만 선택적으로 계산"""
+        if isinstance(df, list):
+            df = pd.DataFrame(df)
         all_indicators = cls.compute_all(df)
         result = {"current_price": all_indicators.get("current_price")}
         for name in indicator_names:
