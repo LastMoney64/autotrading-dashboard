@@ -290,34 +290,41 @@ def _check_position_exit(
                 sl_update = {"new_sl": new_sl, "new_stage": 3, "label": "Lock 1ATR"}
                 position["sl_stage"] = 3
 
-    # ── 기술적 신호 기반 청산 ─────────────────────────
+    # ── 기술적 신호 기반 청산 (완화: 수익 키우기) ──────
 
-    # 1. 반대 방향 강한 신호 → 즉시 청산
-    if is_long and direction == "SELL" and direction_strength >= 3:
-        return True, f"반대 방향 강한 신호 (SELL {direction_strength}개)", sl_update
-    if not is_long and direction == "BUY" and direction_strength >= 3:
-        return True, f"반대 방향 강한 신호 (BUY {direction_strength}개)", sl_update
+    # 수익/손실 상태 확인
+    in_profit = False
+    profit_pct_raw = 0
+    if current_price and entry_price and entry_price > 0:
+        if is_long:
+            profit_pct_raw = (current_price - entry_price) / entry_price * 100
+        else:
+            profit_pct_raw = (entry_price - current_price) / entry_price * 100
+        in_profit = profit_pct_raw > 0
 
-    # 2. 추세 전환 감지
-    if is_long and ema_20 and ema_50 and ema_20 < ema_50 and adx > 30:
-        return True, f"추세 전환 (EMA 역배열 + ADX {adx:.0f})", sl_update
-    if not is_long and ema_20 and ema_50 and ema_20 > ema_50 and adx > 30:
-        return True, f"추세 전환 (EMA 정배열 + ADX {adx:.0f})", sl_update
+    # 1. 반대 방향 매우 강한 신호 → 수익중이면 즉시 청산
+    #    (기존: 3개 → 변경: 4개 이상, 수익중일 때만)
+    if is_long and direction == "SELL" and direction_strength >= 4 and in_profit:
+        return True, f"반대 강신호 (SELL {direction_strength}개, 수익 {profit_pct_raw:.2f}%)", sl_update
+    if not is_long and direction == "BUY" and direction_strength >= 4 and in_profit:
+        return True, f"반대 강신호 (BUY {direction_strength}개, 수익 {profit_pct_raw:.2f}%)", sl_update
 
-    # 3. 과매수/과매도 반전 (수익중일 때만)
-    if current_price and entry_price:
-        in_profit = (current_price > entry_price) if is_long else (current_price < entry_price)
-        if in_profit:
-            if is_long and rsi > 80:
-                return True, f"RSI 극단 과매수 ({rsi:.0f}) — 수익 확보", sl_update
-            if not is_long and rsi < 20:
-                return True, f"RSI 극단 과매도 ({rsi:.0f}) — 수익 확보", sl_update
+    # 2. 추세 전환 감지 (수익중 + ADX 강할 때만)
+    if in_profit and adx > 35:
+        if is_long and ema_20 and ema_50 and ema_20 < ema_50:
+            return True, f"추세 전환 (EMA 역배열 + ADX {adx:.0f})", sl_update
+        if not is_long and ema_20 and ema_50 and ema_20 > ema_50:
+            return True, f"추세 전환 (EMA 정배열 + ADX {adx:.0f})", sl_update
 
-    # 4. MACD 반전 + 추세 약화
-    if is_long and macd_hist and macd_hist < 0 and rsi > 65:
-        return True, f"MACD 반전 + RSI 고점 — 모멘텀 약화", sl_update
-    if not is_long and macd_hist and macd_hist > 0 and rsi < 35:
-        return True, f"MACD 반전 + RSI 저점 — 모멘텀 약화", sl_update
+    # 3. RSI 극단 반전 (수익 +1% 이상일 때만)
+    if in_profit and profit_pct_raw > 1.0:
+        if is_long and rsi > 85:
+            return True, f"RSI 극단 과매수 ({rsi:.0f}) — 수익 {profit_pct_raw:.2f}% 확보", sl_update
+        if not is_long and rsi < 15:
+            return True, f"RSI 극단 과매도 ({rsi:.0f}) — 수익 {profit_pct_raw:.2f}% 확보", sl_update
+
+    # 4. MACD 반전은 제거 — 너무 빨리 청산해서 수익을 못 키움
+    #    대신 SL 이동 + 트레일링이 수익 보호 역할
 
     return False, "", sl_update
 
