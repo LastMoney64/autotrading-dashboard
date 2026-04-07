@@ -85,19 +85,25 @@ class SignalFilter:
 
         if is_strong_downtrend:
             # ── 하락추세: 추세 추종 (SELL만) ────────────────
-            # RSI 과매도 = 더 떨어진다 (BUY 아님!)
-            # RSI 과매수/반등 = SELL 기회
+            # 추세 확인 즉시 SELL (반등 안 기다림)
 
-            if rsi >= 55 and rsi <= 70:
-                # 하락추세 중 반등 → 숏 기회
-                signals.append(f"하락추세 반등 SELL (RSI {rsi:.0f})")
-                sell_signals += 2
-
+            # 1. 추세 확인 = SELL 기본 신호
             if adx >= self.adx_trend_threshold and ema_20 and ema_50 and ema_20 < ema_50:
-                signals.append(f"하락추세 확인 (ADX {adx:.0f})")
+                signals.append(f"하락추세 추종 SELL (ADX {adx:.0f}, EMA 역배열)")
+                sell_signals += 2  # 추세 확인은 강한 신호
+
+            # 2. 반등(RSI 40~70) → 추가 SELL 기회 (더 넓은 범위)
+            if rsi >= 40 and rsi <= 70:
+                signals.append(f"하락추세 반등 SELL (RSI {rsi:.0f})")
                 sell_signals += 1
 
-            # MACD 데드크로스
+            # 3. MACD 음수 지속 = 하락 모멘텀 유지
+            macd_hist_val = indicators.get("macd_histogram", 0)
+            if macd_hist_val and macd_hist_val < 0:
+                signals.append(f"MACD 음수 유지({macd_hist_val:.2f})")
+                sell_signals += 1
+
+            # 4. MACD 데드크로스 (추가 확인)
             if len(df_1h) >= 3:
                 macd_data = IndicatorEngine.macd(df_1h)
                 hist = macd_data["macd_histogram"]
@@ -105,7 +111,7 @@ class SignalFilter:
                     signals.append("MACD 데드크로스")
                     sell_signals += 1
 
-            # EMA 데드크로스 15m
+            # 5. EMA 데드크로스 15m
             if df_15m is not None and len(df_15m) >= 50:
                 ema20_15m = IndicatorEngine.ema(df_15m, 20)
                 ema50_15m = IndicatorEngine.ema(df_15m, 50)
@@ -116,21 +122,31 @@ class SignalFilter:
                         signals.append("EMA 데드크로스(15m)")
                         sell_signals += 1
 
+            # 6. BB 하단 이탈 = 하락 가속 (하락추세에서는 SELL 강화)
+            if price and bb_lower and price <= bb_lower:
+                signals.append("BB 하단 돌파 (하락 가속)")
+                sell_signals += 1
+
         elif is_strong_uptrend:
             # ── 상승추세: 추세 추종 (BUY만) ────────────────
-            # RSI 과매수 = 더 올라간다 (SELL 아님!)
-            # RSI 과매도/눌림목 = BUY 기회
 
-            if rsi <= 45 and rsi >= 30:
-                # 상승추세 중 눌림목 → 롱 기회
-                signals.append(f"상승추세 눌림목 BUY (RSI {rsi:.0f})")
+            # 1. 추세 확인 = BUY 기본 신호
+            if adx >= self.adx_trend_threshold and ema_20 and ema_50 and ema_20 > ema_50:
+                signals.append(f"상승추세 추종 BUY (ADX {adx:.0f}, EMA 정배열)")
                 buy_signals += 2
 
-            if adx >= self.adx_trend_threshold and ema_20 and ema_50 and ema_20 > ema_50:
-                signals.append(f"상승추세 확인 (ADX {adx:.0f})")
+            # 2. 눌림목(RSI 30~60) → 추가 BUY 기회
+            if rsi >= 30 and rsi <= 60:
+                signals.append(f"상승추세 눌림목 BUY (RSI {rsi:.0f})")
                 buy_signals += 1
 
-            # MACD 골든크로스
+            # 3. MACD 양수 지속 = 상승 모멘텀 유지
+            macd_hist_val = indicators.get("macd_histogram", 0)
+            if macd_hist_val and macd_hist_val > 0:
+                signals.append(f"MACD 양수 유지({macd_hist_val:.2f})")
+                buy_signals += 1
+
+            # 4. MACD 골든크로스
             if len(df_1h) >= 3:
                 macd_data = IndicatorEngine.macd(df_1h)
                 hist = macd_data["macd_histogram"]
@@ -138,7 +154,7 @@ class SignalFilter:
                     signals.append("MACD 골든크로스")
                     buy_signals += 1
 
-            # EMA 골든크로스 15m
+            # 5. EMA 골든크로스 15m
             if df_15m is not None and len(df_15m) >= 50:
                 ema20_15m = IndicatorEngine.ema(df_15m, 20)
                 ema50_15m = IndicatorEngine.ema(df_15m, 50)
@@ -148,6 +164,11 @@ class SignalFilter:
                     if prev < 0 and curr > 0:
                         signals.append("EMA 골든크로스(15m)")
                         buy_signals += 1
+
+            # 6. BB 상단 돌파 = 상승 가속
+            if price and bb_upper and price >= bb_upper:
+                signals.append("BB 상단 돌파 (상승 가속)")
+                buy_signals += 1
 
         else:
             # ── 횡보장/급변장: 역추세 매매 허용 ───────────
