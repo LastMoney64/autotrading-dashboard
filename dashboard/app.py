@@ -229,6 +229,78 @@ def create_app(
         ]
         return events[-20:]  # 최근 20건
 
+    # ── 캔들 차트 데이터 (Lightweight Charts용) ────────────
+
+    @app.get("/api/candles/{symbol}/{timeframe}")
+    async def api_candles(symbol: str, timeframe: str = "1h", limit: int = 200):
+        """캔들스틱 데이터 (TradingView Lightweight Charts 형식)"""
+        try:
+            okx = app.state.okx if hasattr(app.state, "okx") else None
+            if not okx:
+                return {"candles": [], "error": "OKX not connected"}
+
+            # OKX에서 캔들 조회
+            pair = symbol.replace("-", "/")
+            candles = await okx.get_candles(pair, timeframe, limit)
+            if not candles:
+                return {"candles": []}
+
+            import pandas as pd
+            df = pd.DataFrame(candles) if isinstance(candles, list) else candles
+
+            # Lightweight Charts 형식: {time, open, high, low, close}
+            chart_data = []
+            for _, row in df.iterrows():
+                ts = row.get("timestamp")
+                if ts is None:
+                    continue
+                if isinstance(ts, str):
+                    from datetime import datetime as dt
+                    ts = dt.fromisoformat(ts)
+                if hasattr(ts, "timestamp"):
+                    unix_ts = int(ts.timestamp())
+                else:
+                    unix_ts = int(ts)
+
+                chart_data.append({
+                    "time": unix_ts,
+                    "open": float(row.get("open", 0)),
+                    "high": float(row.get("high", 0)),
+                    "low": float(row.get("low", 0)),
+                    "close": float(row.get("close", 0)),
+                    "volume": float(row.get("volume", 0)),
+                })
+
+            return {"candles": chart_data}
+        except Exception as e:
+            logger.warning(f"캔들 조회 실패: {e}")
+            return {"candles": [], "error": str(e)}
+
+    @app.get("/api/trade-markers")
+    async def api_trade_markers():
+        """매매 진입/청산 마커 (차트 위에 표시)"""
+        rows = db.conn.execute("""
+            SELECT cycle_id, symbol, judge_signal, entry_price, exit_price,
+                   pnl_pct, final_action, created_at
+            FROM episodes
+            WHERE final_action IN ('EXECUTED', 'CLOSED')
+            ORDER BY id DESC LIMIT 50
+        """).fetchall()
+
+        markers = []
+        for r in rows:
+            if r["entry_price"]:
+                markers.append({
+                    "time": r["created_at"],
+                    "position": "belowBar" if r["judge_signal"] == "BUY" else "aboveBar",
+                    "color": "#26a69a" if r["judge_signal"] == "BUY" else "#ef5350",
+                    "shape": "arrowUp" if r["judge_signal"] == "BUY" else "arrowDown",
+                    "text": f"{r['judge_signal']} ${r['entry_price']:,.0f}" if r["entry_price"] else "",
+                    "price": r["entry_price"],
+                    "pnl": r["pnl_pct"],
+                })
+        return markers
+
     # ── WebSocket: 실시간 업데이트 ────────────────────────
 
     @app.websocket("/ws/live")

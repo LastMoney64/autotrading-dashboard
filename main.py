@@ -176,6 +176,9 @@ async def initialize_system():
         tracker=tracker,
         settings=settings,
     )
+    # OKX 객체를 대시보드에 연결 (캔들 차트용)
+    if okx:
+        dashboard_app.state.okx = okx
 
     return {
         "settings": settings,

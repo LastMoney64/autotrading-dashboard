@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AutoTrading Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root {
   --bg: #0d1117;
@@ -194,7 +195,26 @@ tr:hover { background: rgba(88,166,255,0.05); }
   <div class="stat-card"><div class="label">Active Agents</div><div class="value" id="activeAgents">-</div><div class="sub" id="agentSub">-</div></div>
 </div>
 
-<!-- Chart + Recent trades -->
+<!-- TradingView Candlestick Chart -->
+<div class="grid-full">
+  <div class="panel">
+    <div class="panel-header">
+      Live Chart
+      <div class="tabs">
+        <div class="tab active" onclick="switchSymbol('BTC/USDT:USDT',this)">BTC</div>
+        <div class="tab" onclick="switchSymbol('ETH/USDT:USDT',this)">ETH</div>
+        <div class="tab" onclick="switchTimeframe('15m',this)" id="tf15m">15m</div>
+        <div class="tab active" onclick="switchTimeframe('1h',this)" id="tf1h">1h</div>
+        <div class="tab" onclick="switchTimeframe('4h',this)" id="tf4h">4h</div>
+      </div>
+    </div>
+    <div class="panel-body" style="padding:0;">
+      <div id="tvChart" style="height:400px;width:100%;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- PnL + Recent trades -->
 <div class="grid-2">
   <div class="panel">
     <div class="panel-header">PnL Chart</div>
@@ -262,9 +282,180 @@ let pnlChart = null;
 let allAgents = [];
 const REFRESH_MS = 10000;
 
+// ── TradingView Lightweight Chart ─────────────────
+let tvChart = null;
+let candleSeries = null;
+let ema20Line = null;
+let ema50Line = null;
+let bbUpper = null;
+let bbLower = null;
+let volumeSeries = null;
+let currentSymbol = 'BTC/USDT:USDT';
+let currentTF = '1h';
+
+function initTVChart() {
+  const container = document.getElementById('tvChart');
+  if (!container || typeof LightweightCharts === 'undefined') return;
+
+  tvChart = LightweightCharts.createChart(container, {
+    layout: { background: { color: '#0d1117' }, textColor: '#8b949e' },
+    grid: {
+      vertLines: { color: 'rgba(139,148,158,0.06)' },
+      horzLines: { color: 'rgba(139,148,158,0.06)' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#21262d' },
+    timeScale: { borderColor: '#21262d', timeVisible: true },
+  });
+
+  // 캔들스틱
+  candleSeries = tvChart.addCandlestickSeries({
+    upColor: '#3fb950', downColor: '#f85149',
+    borderUpColor: '#3fb950', borderDownColor: '#f85149',
+    wickUpColor: '#3fb950', wickDownColor: '#f85149',
+  });
+
+  // 거래량
+  volumeSeries = tvChart.addHistogramSeries({
+    color: '#3b82f680',
+    priceFormat: { type: 'volume' },
+    priceScaleId: 'volume',
+  });
+  tvChart.priceScale('volume').applyOptions({
+    scaleMargins: { top: 0.8, bottom: 0 },
+  });
+
+  // EMA 20 (파란색)
+  ema20Line = tvChart.addLineSeries({
+    color: '#3b82f6', lineWidth: 1,
+    priceLineVisible: false, lastValueVisible: false,
+  });
+
+  // EMA 50 (노란색)
+  ema50Line = tvChart.addLineSeries({
+    color: '#eab308', lineWidth: 1,
+    priceLineVisible: false, lastValueVisible: false,
+  });
+
+  // BB Upper (회색 점선)
+  bbUpper = tvChart.addLineSeries({
+    color: 'rgba(139,148,158,0.4)', lineWidth: 1, lineStyle: 2,
+    priceLineVisible: false, lastValueVisible: false,
+  });
+
+  // BB Lower (회색 점선)
+  bbLower = tvChart.addLineSeries({
+    color: 'rgba(139,148,158,0.4)', lineWidth: 1, lineStyle: 2,
+    priceLineVisible: false, lastValueVisible: false,
+  });
+
+  // 반응형
+  new ResizeObserver(() => {
+    tvChart.applyOptions({ width: container.clientWidth });
+  }).observe(container);
+
+  fetchCandles();
+  // 60초마다 캔들 업데이트
+  setInterval(fetchCandles, 60000);
+}
+
+async function fetchCandles() {
+  try {
+    const sym = currentSymbol.replace('/', '-').replace(':', '-');
+    const resp = await fetch(`${API}/api/candles/${sym}/${currentTF}?limit=200`);
+    const data = await resp.json();
+    if (!data.candles || !data.candles.length) return;
+
+    const candles = data.candles;
+    candleSeries.setData(candles);
+
+    // 거래량
+    const volData = candles.map(c => ({
+      time: c.time,
+      value: c.volume,
+      color: c.close >= c.open ? '#3fb95040' : '#f8514940',
+    }));
+    volumeSeries.setData(volData);
+
+    // EMA 20/50 계산
+    const closes = candles.map(c => c.close);
+    const ema20Data = calcEMA(closes, 20).map((v, i) => ({ time: candles[i].time, value: v })).filter(d => d.value);
+    const ema50Data = calcEMA(closes, 50).map((v, i) => ({ time: candles[i].time, value: v })).filter(d => d.value);
+    ema20Line.setData(ema20Data);
+    ema50Line.setData(ema50Data);
+
+    // 볼린저밴드 계산
+    const bb = calcBB(closes, 20, 2);
+    const bbUpData = bb.upper.map((v, i) => ({ time: candles[i].time, value: v })).filter(d => d.value);
+    const bbLoData = bb.lower.map((v, i) => ({ time: candles[i].time, value: v })).filter(d => d.value);
+    bbUpper.setData(bbUpData);
+    bbLower.setData(bbLoData);
+
+    // 매매 마커
+    await fetchMarkers();
+
+  } catch(e) { console.error('candles fetch error:', e); }
+}
+
+async function fetchMarkers() {
+  try {
+    const resp = await fetch(`${API}/api/trade-markers`);
+    const markers = await resp.json();
+    if (markers && markers.length) {
+      candleSeries.setMarkers(markers.slice(0, 20));
+    }
+  } catch(e) {}
+}
+
+function switchSymbol(sym, el) {
+  currentSymbol = sym;
+  document.querySelectorAll('.panel-header .tab').forEach(t => {
+    if (t.textContent === 'BTC' || t.textContent === 'ETH') t.classList.remove('active');
+  });
+  el.classList.add('active');
+  fetchCandles();
+}
+
+function switchTimeframe(tf, el) {
+  currentTF = tf;
+  document.querySelectorAll('[id^="tf"]').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  fetchCandles();
+}
+
+// EMA 계산
+function calcEMA(data, period) {
+  const k = 2 / (period + 1);
+  const ema = new Array(data.length).fill(null);
+  if (data.length < period) return ema;
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += data[i];
+  ema[period - 1] = sum / period;
+  for (let i = period; i < data.length; i++) {
+    ema[i] = data[i] * k + ema[i - 1] * (1 - k);
+  }
+  return ema;
+}
+
+// 볼린저밴드 계산
+function calcBB(data, period, stdDev) {
+  const upper = new Array(data.length).fill(null);
+  const lower = new Array(data.length).fill(null);
+  for (let i = period - 1; i < data.length; i++) {
+    const slice = data.slice(i - period + 1, i + 1);
+    const mean = slice.reduce((a, b) => a + b, 0) / period;
+    const variance = slice.reduce((a, b) => a + (b - mean) ** 2, 0) / period;
+    const std = Math.sqrt(variance);
+    upper[i] = mean + stdDev * std;
+    lower[i] = mean - stdDev * std;
+  }
+  return { upper, lower };
+}
+
 // ── Init ───────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
+  initTVChart();
   fetchAll();
   setInterval(fetchAll, REFRESH_MS);
   connectWS();
