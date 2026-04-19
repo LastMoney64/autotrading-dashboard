@@ -67,6 +67,11 @@ class Settings:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # ── 모닝 브리프 API ────────────────────────────────
+    etherscan_api_key: str = ""
+    morning_brief_hour_kst: int = 7   # 아침 7시 KST
+    morning_brief_enabled: bool = True
+
     def __post_init__(self):
         if not self.db_path:
             self.db_path = str(self.base_dir / "data" / "trading.db")
@@ -86,4 +91,7 @@ class Settings:
             initial_capital=float(os.getenv("INITIAL_CAPITAL", "100")),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            etherscan_api_key=os.getenv("ETHERSCAN_API_KEY", ""),
+            morning_brief_hour_kst=int(os.getenv("MORNING_BRIEF_HOUR_KST", "7")),
+            morning_brief_enabled=os.getenv("MORNING_BRIEF_ENABLED", "true").lower() == "true",
         )

@@ -31,6 +31,7 @@ from execution.okx_exchange import OKXExchange
 from data.signal_filter import SignalFilter
 from data.market_regime import MarketRegimeDetector
 from evolution.trade_feedback import TradeFeedback
+from morning_brief import MorningBriefEngine
 
 # ── 에이전트 임포트 ──────────────────────────────────────
 from agents.analysts.trend_agent import TrendAgent
@@ -195,6 +196,7 @@ async def initialize_system():
         "okx": okx,
         "signal_filter": signal_filter,
         "feedback": TradeFeedback(db, registry=registry, fee_taker_pct=settings.fee_taker_pct),
+        "morning_brief": None,  # main_loop에서 초기화
     }
 
 
@@ -380,6 +382,16 @@ async def main_loop(system: dict):
     signal_filter = system["signal_filter"]
     feedback = system["feedback"]
 
+    # 모닝 브리프 엔진 초기화
+    morning_brief = MorningBriefEngine(
+        settings=settings, okx=okx, feedback=feedback,
+        db=db, telegram=telegram,
+    )
+    logger.info(
+        f"🌅 모닝 브리프 활성 (매일 {settings.morning_brief_hour_kst}시 KST)"
+        if settings.morning_brief_enabled else "🌅 모닝 브리프 비활성"
+    )
+
     trades_since_evolution = 0
     scan_count = 0
     trigger_count = 0
@@ -423,6 +435,13 @@ async def main_loop(system: dict):
                 if paused:
                     await asyncio.sleep(2)
                     continue
+
+                # ── 모닝 브리프 체크 (매일 7시 KST) ──────
+                try:
+                    if await morning_brief.should_run_now():
+                        await morning_brief.generate_and_send()
+                except Exception as e:
+                    logger.warning(f"모닝 브리프 에러: {e}")
 
                 # ── 일일 리셋 ────────────────────────────
                 today = _date.today()

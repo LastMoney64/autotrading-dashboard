@@ -1,0 +1,237 @@
+"""
+MorningBriefEngine — 매일 아침 7시 자동 시장 브리핑
+
+데이터 수집 → 분석 → 텔레그램 포맷 → 발송
+"""
+
+import asyncio
+import logging
+from datetime import datetime, timezone, timedelta
+
+from morning_brief.collectors import (
+    fetch_fear_greed_index,
+    fetch_price_and_funding,
+    fetch_onchain_flows,
+    fetch_whale_activity,
+    fetch_trending_memes,
+    fetch_bot_status,
+)
+
+logger = logging.getLogger(__name__)
+KST = timezone(timedelta(hours=9))
+
+
+class MorningBriefEngine:
+    """매일 아침 7시 KST 자동 브리핑"""
+
+    def __init__(self, settings, okx, feedback, db, telegram):
+        self.settings = settings
+        self.okx = okx
+        self.feedback = feedback
+        self.db = db
+        self.telegram = telegram
+        self._last_run_date = None
+
+    async def should_run_now(self) -> bool:
+        """현재 7시 KST이고 오늘 아직 안 돌았으면 True"""
+        if not self.settings.morning_brief_enabled:
+            return False
+
+        now_kst = datetime.now(KST)
+        target_hour = self.settings.morning_brief_hour_kst
+
+        # 7시~7시59분 사이, 오늘 아직 안 돌았으면 실행
+        if now_kst.hour == target_hour and self._last_run_date != now_kst.date():
+            return True
+        return False
+
+    async def generate_and_send(self):
+        """브리핑 생성 + 발송"""
+        logger.info("🌅 모닝 브리프 시작...")
+
+        # 데이터 병렬 수집 (빠르게)
+        results = await asyncio.gather(
+            fetch_fear_greed_index(),
+            fetch_price_and_funding(self.okx),
+            fetch_onchain_flows(),
+            fetch_whale_activity(self.settings.etherscan_api_key),
+            fetch_trending_memes(),
+            fetch_bot_status(self.db, self.feedback, self.okx),
+            return_exceptions=True,
+        )
+
+        fg, price, onchain, whales, memes, bot = results
+
+        # 예외면 빈 dict로 대체
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                logger.warning(f"수집기 {i} 예외: {r}")
+
+        message = self._format_brief(
+            fg if not isinstance(fg, Exception) else {},
+            price if not isinstance(price, Exception) else {},
+            onchain if not isinstance(onchain, Exception) else {},
+            whales if not isinstance(whales, Exception) else {},
+            memes if not isinstance(memes, Exception) else {},
+            bot if not isinstance(bot, Exception) else {},
+        )
+
+        await self.telegram.send(message)
+        self._last_run_date = datetime.now(KST).date()
+        logger.info("✅ 모닝 브리프 발송 완료")
+
+    def _format_brief(self, fg, price, onchain, whales, memes, bot) -> str:
+        """텔레그램 HTML 포맷"""
+        now_kst = datetime.now(KST)
+        date_str = now_kst.strftime("%m월 %d일 %H:%M KST")
+
+        lines = [f"📊 <b>모닝 브리프 — {date_str}</b>", ""]
+
+        # ── 1. 가격 ────────────────────────────────
+        lines.append("💰 <b>가격 (24H)</b>")
+        for sym_key, emoji in [("BTC", "🟠"), ("ETH", "🔵")]:
+            p = price.get(sym_key, {}) if isinstance(price, dict) else {}
+            if p.get("price"):
+                change = p.get("change_24h", 0) or 0
+                arrow = "📈" if change > 0 else "📉"
+                lines.append(
+                    f"{emoji} {sym_key}: <b>${p['price']:,.0f}</b> "
+                    f"{arrow} {change:+.2f}%"
+                )
+            else:
+                lines.append(f"{emoji} {sym_key}: 데이터 없음")
+        lines.append("")
+
+        # ── 2. 심리 ────────────────────────────────
+        lines.append("😱 <b>시장 심리</b>")
+        if fg.get("value") is not None:
+            v = fg["value"]
+            kr = fg.get("kr_class", "")
+            w = fg.get("week_ago", v)
+            lines.append(f"공포탐욕지수: <b>{v}</b> ({kr})")
+            lines.append(f"일주일 전: {w} → 변화: {v - w:+d}")
+            if fg.get("interpretation"):
+                lines.append(f"💡 <i>{fg['interpretation']}</i>")
+        else:
+            lines.append("데이터 수집 실패")
+        lines.append("")
+
+        # ── 3. 펀딩비 ──────────────────────────────
+        lines.append("🔥 <b>펀딩비 크로스</b>")
+        for sym_key in ["BTC", "ETH"]:
+            p = price.get(sym_key, {}) if isinstance(price, dict) else {}
+            okx_f = p.get("funding_okx", 0) or 0
+            bn_f = p.get("funding_binance", 0) or 0
+            bb_f = p.get("funding_bybit", 0) or 0
+            avg_f = (okx_f + bn_f + bb_f) / 3 * 100
+
+            if abs(avg_f) > 0.05:
+                signal = "⚠️ 롱 과열" if avg_f > 0.05 else "⚠️ 숏 과열"
+            else:
+                signal = "중립"
+
+            lines.append(
+                f"<b>{sym_key}</b>: OKX {okx_f*100:.3f}% / "
+                f"Bin {bn_f*100:.3f}% / Byb {bb_f*100:.3f}% → {signal}"
+            )
+        lines.append("")
+
+        # ── 4. 온체인 ──────────────────────────────
+        lines.append("⛓️ <b>온체인</b>")
+        if onchain.get("stablecoin_mc_usd"):
+            mc = onchain["stablecoin_mc_usd"] / 1e9
+            lines.append(f"스테이블코인 시총: ${mc:,.1f}B")
+        if onchain.get("defi_tvl_usd"):
+            tvl = onchain["defi_tvl_usd"] / 1e9
+            d24 = onchain.get("tvl_change_24h_pct", 0)
+            d7 = onchain.get("tvl_change_7d_pct", 0)
+            lines.append(f"DeFi TVL: ${tvl:,.1f}B ({d24:+.2f}% / {d7:+.2f}%)")
+        lines.append("")
+
+        # ── 5. 고래 ────────────────────────────────
+        lines.append("🐋 <b>고래 동향</b>")
+        if whales.get("whales"):
+            for w in whales["whales"][:3]:
+                lines.append(
+                    f"• {w['name']}: {w['eth_balance']:,.0f} ETH"
+                )
+        else:
+            lines.append("데이터 수집 중")
+        lines.append("")
+
+        # ── 6. 밈코인 트렌딩 ──────────────────────
+        lines.append("💎 <b>솔라나 밈코인 TOP 5</b>")
+        if memes.get("trending"):
+            for i, m in enumerate(memes["trending"][:5], 1):
+                ch = m.get("change_24h", 0)
+                vol = m.get("volume_24h", 0) / 1000
+                arrow = "🚀" if ch > 50 else "📈" if ch > 0 else "📉"
+                lines.append(
+                    f"{i}. <b>${m['name']}</b> {arrow} "
+                    f"{ch:+.1f}% | ${vol:,.0f}K vol"
+                )
+        else:
+            lines.append("데이터 수집 중")
+        lines.append("")
+
+        # ── 7. 우리 봇 상태 ────────────────────────
+        lines.append("🤖 <b>우리 봇 상태</b>")
+        if bot.get("balance_usd") is not None:
+            lines.append(f"잔고: <b>${bot['balance_usd']:.2f}</b>")
+            lines.append(
+                f"승률: {bot.get('win_rate', 0)*100:.0f}% "
+                f"({bot.get('wins', 0)}승/{bot.get('losses', 0)}패)"
+            )
+            lines.append(f"누적 PnL: {bot.get('total_pnl_pct', 0):+.2f}%")
+            if bot.get("consecutive_losses", 0) >= 3:
+                lines.append(f"⚠️ 연속 {bot['consecutive_losses']}패 — 주의")
+            if bot.get("open_positions"):
+                lines.append(f"활성 포지션: {bot['open_positions']}개")
+        else:
+            lines.append("데이터 수집 중")
+        lines.append("")
+
+        # ── 8. 오늘의 전략 (AI 요약) ───────────────
+        strategy = self._derive_strategy(fg, price, onchain, bot)
+        if strategy:
+            lines.append("💡 <b>오늘의 전략</b>")
+            for s in strategy:
+                lines.append(f"• {s}")
+
+        return "\n".join(lines)
+
+    def _derive_strategy(self, fg, price, onchain, bot) -> list[str]:
+        """코드 기반 전략 도출 (AI 호출 없음 — 비용 $0)"""
+        tips = []
+
+        # 공포탐욕 극단
+        fg_val = fg.get("value", 50)
+        if fg_val < 15:
+            tips.append("극단적 공포 → BTC/ETH 롱 관심 (역사적 매수 구간)")
+        elif fg_val > 80:
+            tips.append("극단적 탐욕 → 수익 실현 + 포지션 축소 권고")
+
+        # 펀딩비 극단
+        btc_p = price.get("BTC", {}) if isinstance(price, dict) else {}
+        avg_fund = (
+            (btc_p.get("funding_okx", 0) or 0)
+            + (btc_p.get("funding_binance", 0) or 0)
+            + (btc_p.get("funding_bybit", 0) or 0)
+        ) / 3 * 100
+        if avg_fund < -0.05:
+            tips.append(f"BTC 숏 과열 ({avg_fund:.3f}%) → 반등 기대 롱 관심")
+        elif avg_fund > 0.05:
+            tips.append(f"BTC 롱 과열 ({avg_fund:.3f}%) → 청산 주의")
+
+        # 봇 연패
+        if bot.get("consecutive_losses", 0) >= 3:
+            tips.append("연패 중 — 진입 기준 강화, 확신도 높은 신호만")
+
+        # TVL 하락
+        if onchain.get("tvl_change_24h_pct", 0) < -3:
+            tips.append("DeFi TVL 급락 → 위험 자산 회피 모드")
+
+        if not tips:
+            tips.append("뚜렷한 극단 신호 없음 — 기존 전략 유지")
+
+        return tips
