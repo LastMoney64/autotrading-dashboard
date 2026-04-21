@@ -101,26 +101,47 @@ async def fetch_price_and_funding(okx_exchange) -> dict:
                 logger.warning(f"OKX {sym} 데이터 실패: {e}")
 
         # Binance / Bybit 펀딩비 (공개 API, 키 불필요)
-        binance = ccxt.binance({"options": {"defaultType": "swap"}})
-        bybit = ccxt.bybit({"options": {"defaultType": "swap"}})
+        binance = ccxt.binance({"options": {"defaultType": "swap"}, "enableRateLimit": True})
+        bybit = ccxt.bybit({"options": {"defaultType": "swap"}, "enableRateLimit": True})
 
         try:
-            for sym_bin, sym_key in [("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")]:
-                # Binance
+            # 마켓 로드 먼저 (심볼 정규화)
+            try:
+                await binance.load_markets()
+            except Exception as e:
+                logger.debug(f"Binance load_markets 실패: {e}")
+            try:
+                await bybit.load_markets()
+            except Exception as e:
+                logger.debug(f"Bybit load_markets 실패: {e}")
+
+            for sym_unified, sym_key in [("BTC/USDT:USDT", "BTC"), ("ETH/USDT:USDT", "ETH")]:
+                # Binance — unified symbol 사용
                 try:
-                    bn_fund = await binance.fetch_funding_rate(sym_bin)
-                    results[sym_key]["funding_binance"] = bn_fund.get("fundingRate", 0)
-                except Exception:
-                    pass
-                # Bybit
+                    bn_fund = await binance.fetch_funding_rate(sym_unified)
+                    rate = bn_fund.get("fundingRate") or bn_fund.get("info", {}).get("lastFundingRate", 0)
+                    results[sym_key]["funding_binance"] = float(rate) if rate else 0
+                except Exception as e:
+                    logger.debug(f"Binance {sym_unified} 펀딩비 실패: {e}")
+                    results[sym_key]["funding_binance"] = 0
+
+                # Bybit — unified symbol 사용
                 try:
-                    bb_fund = await bybit.fetch_funding_rate(sym_bin)
-                    results[sym_key]["funding_bybit"] = bb_fund.get("fundingRate", 0)
-                except Exception:
-                    pass
+                    bb_fund = await bybit.fetch_funding_rate(sym_unified)
+                    rate = bb_fund.get("fundingRate") or bb_fund.get("info", {}).get("fundingRate", 0)
+                    results[sym_key]["funding_bybit"] = float(rate) if rate else 0
+                except Exception as e:
+                    logger.debug(f"Bybit {sym_unified} 펀딩비 실패: {e}")
+                    results[sym_key]["funding_bybit"] = 0
         finally:
-            await binance.close()
-            await bybit.close()
+            try:
+                await binance.close()
+            except Exception:
+                pass
+            try:
+                await bybit.close()
+            except Exception:
+                pass
 
         return results
 
@@ -136,36 +157,72 @@ async def fetch_price_and_funding(okx_exchange) -> dict:
 async def fetch_onchain_flows() -> dict:
     """스테이블코인 마켓캡 변화 + DeFi TVL"""
     try:
+        total_mc = 0
+        stable_change_24h = 0
+        today_tvl = 0
+        tvl_change_24h = 0
+        tvl_change_7d = 0
+
         async with aiohttp.ClientSession() as session:
-            # 스테이블코인 전체 마켓캡
-            async with session.get(
-                "https://stablecoins.llama.fi/stablecoins",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                stables = await resp.json()
-                total_mc = stables.get("totalCirculating", {}).get("peggedUSD", 0)
+            # 스테이블코인 전체 마켓캡 (+ 24H 변화)
+            try:
+                async with session.get(
+                    "https://stablecoins.llama.fi/stablecoincharts/all",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    chart = await resp.json()
+                    if chart and len(chart) >= 2:
+                        # 각 항목: {date, totalCirculating: {peggedUSD, ...}}
+                        latest = chart[-1].get("totalCirculating", {})
+                        prev_day = chart[-2].get("totalCirculating", {}) if len(chart) >= 2 else latest
+                        total_mc = latest.get("peggedUSD", 0)
+                        prev_mc = prev_day.get("peggedUSD", 0)
+                        if prev_mc:
+                            stable_change_24h = (total_mc - prev_mc) / prev_mc * 100
+            except Exception as e:
+                logger.debug(f"스테이블코인 차트 실패: {e}")
+                # fallback: 단순 총액
+                try:
+                    async with session.get(
+                        "https://stablecoins.llama.fi/stablecoins",
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        stables = await resp.json()
+                        total_mc = stables.get("totalCirculating", {}).get("peggedUSD", 0)
+                except Exception:
+                    pass
 
             # DeFi 전체 TVL
-            async with session.get(
-                "https://api.llama.fi/v2/historicalChainTvl",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                tvl_data = await resp.json()
-                if tvl_data:
-                    today_tvl = tvl_data[-1].get("tvl", 0)
-                    day_ago_tvl = tvl_data[-2].get("tvl", today_tvl) if len(tvl_data) > 1 else today_tvl
-                    week_ago_tvl = tvl_data[-8].get("tvl", today_tvl) if len(tvl_data) > 7 else today_tvl
-                    tvl_change_24h = ((today_tvl - day_ago_tvl) / day_ago_tvl * 100) if day_ago_tvl else 0
-                    tvl_change_7d = ((today_tvl - week_ago_tvl) / week_ago_tvl * 100) if week_ago_tvl else 0
-                else:
-                    today_tvl = tvl_change_24h = tvl_change_7d = 0
+            try:
+                async with session.get(
+                    "https://api.llama.fi/v2/historicalChainTvl",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    tvl_data = await resp.json()
+                    if tvl_data and len(tvl_data) > 0:
+                        today_tvl = tvl_data[-1].get("tvl", 0)
 
-            return {
-                "stablecoin_mc_usd": total_mc,
-                "defi_tvl_usd": today_tvl,
-                "tvl_change_24h_pct": tvl_change_24h,
-                "tvl_change_7d_pct": tvl_change_7d,
-            }
+                        # 24H: 하루 전 (1일)
+                        if len(tvl_data) >= 2:
+                            day_ago_tvl = tvl_data[-2].get("tvl", today_tvl)
+                            if day_ago_tvl and day_ago_tvl != today_tvl:
+                                tvl_change_24h = (today_tvl - day_ago_tvl) / day_ago_tvl * 100
+
+                        # 7D: 7일 전
+                        if len(tvl_data) >= 8:
+                            week_ago_tvl = tvl_data[-8].get("tvl", today_tvl)
+                            if week_ago_tvl:
+                                tvl_change_7d = (today_tvl - week_ago_tvl) / week_ago_tvl * 100
+            except Exception as e:
+                logger.debug(f"TVL 차트 실패: {e}")
+
+        return {
+            "stablecoin_mc_usd": total_mc,
+            "stablecoin_change_24h_pct": stable_change_24h,
+            "defi_tvl_usd": today_tvl,
+            "tvl_change_24h_pct": tvl_change_24h,
+            "tvl_change_7d_pct": tvl_change_7d,
+        }
     except Exception as e:
         logger.warning(f"온체인 수집 실패: {e}")
         return {"error": str(e)}
@@ -183,37 +240,66 @@ WHALE_WALLETS = {
 }
 
 async def fetch_whale_activity(etherscan_key: str) -> dict:
-    """추적 지갑들의 24H 큰 움직임"""
+    """추적 지갑들의 24H 큰 움직임 (Etherscan V2 API 사용)"""
     if not etherscan_key:
+        logger.warning("Etherscan API 키 없음 (ETHERSCAN_API_KEY 환경변수 확인)")
         return {"error": "no key"}
+
+    logger.info(f"🐋 고래 추적 시작 (키 {etherscan_key[:8]}...)")
+    whales = []
+
     try:
-        whales = []
         async with aiohttp.ClientSession() as session:
-            for name, addr in list(WHALE_WALLETS.items())[:3]:  # rate limit 고려
+            for name, addr in list(WHALE_WALLETS.items())[:3]:
                 try:
-                    # ETH 잔고
-                    url = (
-                        f"https://api.etherscan.io/api"
-                        f"?module=account&action=balance&address={addr}"
-                        f"&tag=latest&apikey={etherscan_key}"
-                    )
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        data = await resp.json()
-                        if data.get("status") == "1":
-                            balance_wei = int(data.get("result", 0))
-                            balance_eth = balance_wei / 1e18
-                            whales.append({
-                                "name": name,
-                                "address": addr[:10] + "...",
-                                "eth_balance": round(balance_eth, 2),
-                            })
-                    await asyncio.sleep(0.3)  # 5/sec rate limit
+                    # Etherscan V2 API (chainid=1은 이더리움)
+                    url = "https://api.etherscan.io/v2/api"
+                    params = {
+                        "chainid": 1,
+                        "module": "account",
+                        "action": "balance",
+                        "address": addr,
+                        "tag": "latest",
+                        "apikey": etherscan_key,
+                    }
+                    async with session.get(
+                        url, params=params,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp:
+                        text = await resp.text()
+                        try:
+                            data = await resp.json(content_type=None)
+                        except Exception:
+                            import json
+                            data = json.loads(text) if text else {}
+
+                        # V2 API는 status/result 또는 바로 잔고 반환
+                        if data.get("status") == "1" or "result" in data:
+                            result_val = data.get("result", "0")
+                            try:
+                                balance_wei = int(result_val) if result_val else 0
+                                balance_eth = balance_wei / 1e18
+                                whales.append({
+                                    "name": name,
+                                    "address": addr[:10] + "...",
+                                    "eth_balance": round(balance_eth, 2),
+                                })
+                                logger.debug(f"  ✅ {name}: {balance_eth:,.2f} ETH")
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"  ❌ {name} 파싱 실패: result={result_val}, e={e}")
+                        else:
+                            msg = data.get("message", "unknown")
+                            logger.warning(f"  ❌ {name} API 에러: status={data.get('status')}, msg={msg}")
+
+                    await asyncio.sleep(0.3)  # V2도 5/sec 제한
                 except Exception as e:
-                    logger.debug(f"고래 {name} 조회 실패: {e}")
+                    logger.warning(f"  ❌ {name} 조회 실패: {type(e).__name__}: {e}")
                     continue
+
+        logger.info(f"🐋 고래 추적 완료: {len(whales)}개 조회 성공")
         return {"whales": whales}
     except Exception as e:
-        logger.warning(f"고래 수집 실패: {e}")
+        logger.warning(f"고래 수집 전체 실패: {type(e).__name__}: {e}")
         return {"error": str(e)}
 
 

@@ -140,12 +140,14 @@ class MorningBriefEngine:
         lines.append("⛓️ <b>온체인</b>")
         if onchain.get("stablecoin_mc_usd"):
             mc = onchain["stablecoin_mc_usd"] / 1e9
-            lines.append(f"스테이블코인 시총: ${mc:,.1f}B")
+            sd24 = onchain.get("stablecoin_change_24h_pct", 0)
+            arrow = "📈" if sd24 > 0 else "📉" if sd24 < 0 else ""
+            lines.append(f"스테이블코인: ${mc:,.1f}B {arrow} {sd24:+.2f}% (24H)")
         if onchain.get("defi_tvl_usd"):
             tvl = onchain["defi_tvl_usd"] / 1e9
             d24 = onchain.get("tvl_change_24h_pct", 0)
             d7 = onchain.get("tvl_change_7d_pct", 0)
-            lines.append(f"DeFi TVL: ${tvl:,.1f}B ({d24:+.2f}% / {d7:+.2f}%)")
+            lines.append(f"DeFi TVL: ${tvl:,.1f}B (24H {d24:+.2f}% / 7D {d7:+.2f}%)")
         lines.append("")
 
         # ── 5. 고래 ────────────────────────────────
