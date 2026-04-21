@@ -116,14 +116,17 @@ class MorningBriefEngine:
             lines.append("데이터 수집 실패")
         lines.append("")
 
-        # ── 3. 펀딩비 ──────────────────────────────
+        # ── 3. 펀딩비 (OKX + Bitget + Hyperliquid) ────────
         lines.append("🔥 <b>펀딩비 크로스</b>")
         for sym_key in ["BTC", "ETH"]:
             p = price.get(sym_key, {}) if isinstance(price, dict) else {}
             okx_f = p.get("funding_okx", 0) or 0
-            bn_f = p.get("funding_binance", 0) or 0
-            bb_f = p.get("funding_bybit", 0) or 0
-            avg_f = (okx_f + bn_f + bb_f) / 3 * 100
+            bg_f = p.get("funding_bitget", 0) or 0
+            hl_f = p.get("funding_hyperliquid", 0) or 0
+
+            # 유효한 값만 평균
+            valid = [x for x in [okx_f, bg_f, hl_f] if abs(x) > 1e-8]
+            avg_f = (sum(valid) / len(valid) * 100) if valid else 0
 
             if abs(avg_f) > 0.05:
                 signal = "⚠️ 롱 과열" if avg_f > 0.05 else "⚠️ 숏 과열"
@@ -132,7 +135,7 @@ class MorningBriefEngine:
 
             lines.append(
                 f"<b>{sym_key}</b>: OKX {okx_f*100:.3f}% / "
-                f"Bin {bn_f*100:.3f}% / Byb {bb_f*100:.3f}% → {signal}"
+                f"Bitget {bg_f*100:.3f}% / HL {hl_f*100:.3f}% → {signal}"
             )
         lines.append("")
 
@@ -215,11 +218,13 @@ class MorningBriefEngine:
 
         # 펀딩비 극단
         btc_p = price.get("BTC", {}) if isinstance(price, dict) else {}
-        avg_fund = (
-            (btc_p.get("funding_okx", 0) or 0)
-            + (btc_p.get("funding_binance", 0) or 0)
-            + (btc_p.get("funding_bybit", 0) or 0)
-        ) / 3 * 100
+        fund_vals = [
+            btc_p.get("funding_okx", 0) or 0,
+            btc_p.get("funding_bitget", 0) or 0,
+            btc_p.get("funding_hyperliquid", 0) or 0,
+        ]
+        valid_funds = [x for x in fund_vals if abs(x) > 1e-8]
+        avg_fund = (sum(valid_funds) / len(valid_funds) * 100) if valid_funds else 0
         if avg_fund < -0.05:
             tips.append(f"BTC 숏 과열 ({avg_fund:.3f}%) → 반등 기대 롱 관심")
         elif avg_fund > 0.05:

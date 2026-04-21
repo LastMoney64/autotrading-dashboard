@@ -95,54 +95,62 @@ async def fetch_price_and_funding(okx_exchange) -> dict:
         except Exception as e:
             logger.warning(f"OKX {sym} 실패: {e}")
 
-    # ── Binance 펀딩비 (공식 HTTP API) ────────────────
-    # https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT
-    async with aiohttp.ClientSession() as session:
-        for sym_bin, sym_key in [("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")]:
-            # Binance
-            try:
-                async with session.get(
-                    "https://fapi.binance.com/fapi/v1/premiumIndex",
-                    params={"symbol": sym_bin},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                    headers={"User-Agent": "Mozilla/5.0"},
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        rate = float(data.get("lastFundingRate", 0))
-                        results[sym_key]["funding_binance"] = rate
-                        logger.debug(f"  ✅ Binance {sym_bin}: {rate*100:.4f}%")
-                    else:
-                        logger.warning(f"  ❌ Binance {sym_bin} HTTP {resp.status}")
-                        results[sym_key]["funding_binance"] = 0
-            except Exception as e:
-                logger.warning(f"  ❌ Binance {sym_bin}: {type(e).__name__}: {e}")
-                results[sym_key]["funding_binance"] = 0
+    # Binance는 Railway(미국 서버) 차단되니 Bitget + Hyperliquid로 대체
+    # 모두 지역 제한 없음
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
 
-            # Bybit V5 API
-            # https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # ── Bitget 펀딩비 ────────────────────────────
+        # https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=BTCUSDT&productType=USDT-FUTURES
+        for sym_bg, sym_key in [("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")]:
             try:
                 async with session.get(
-                    "https://api.bybit.com/v5/market/tickers",
-                    params={"category": "linear", "symbol": sym_bin},
+                    "https://api.bitget.com/api/v2/mix/market/current-fund-rate",
+                    params={"symbol": sym_bg, "productType": "USDT-FUTURES"},
                     timeout=aiohttp.ClientTimeout(total=10),
-                    headers={"User-Agent": "Mozilla/5.0"},
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        rlist = data.get("result", {}).get("list", [])
-                        if rlist:
+                        rlist = data.get("data", [])
+                        if rlist and isinstance(rlist, list) and len(rlist) > 0:
                             rate = float(rlist[0].get("fundingRate", 0))
-                            results[sym_key]["funding_bybit"] = rate
-                            logger.debug(f"  ✅ Bybit {sym_bin}: {rate*100:.4f}%")
+                            results[sym_key]["funding_bitget"] = rate
+                            logger.debug(f"  ✅ Bitget {sym_bg}: {rate*100:.4f}%")
                         else:
-                            results[sym_key]["funding_bybit"] = 0
+                            results[sym_key]["funding_bitget"] = 0
+                            logger.warning(f"  ⚠️ Bitget {sym_bg} 빈 응답: {data}")
                     else:
-                        logger.warning(f"  ❌ Bybit {sym_bin} HTTP {resp.status}")
-                        results[sym_key]["funding_bybit"] = 0
+                        logger.warning(f"  ❌ Bitget {sym_bg} HTTP {resp.status}")
+                        results[sym_key]["funding_bitget"] = 0
             except Exception as e:
-                logger.warning(f"  ❌ Bybit {sym_bin}: {type(e).__name__}: {e}")
-                results[sym_key]["funding_bybit"] = 0
+                logger.warning(f"  ❌ Bitget {sym_bg}: {type(e).__name__}: {e}")
+                results[sym_key]["funding_bitget"] = 0
+
+        # ── Hyperliquid 펀딩비 ──────────────────────
+        # https://api.hyperliquid.xyz/info (POST)
+        try:
+            async with session.post(
+                "https://api.hyperliquid.xyz/info",
+                json={"type": "metaAndAssetCtxs"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # data = [meta, assetCtxs]
+                    if isinstance(data, list) and len(data) >= 2:
+                        meta, ctxs = data[0], data[1]
+                        universe = meta.get("universe", [])
+                        for i, asset in enumerate(universe):
+                            name = asset.get("name", "")
+                            if name in ("BTC", "ETH") and i < len(ctxs):
+                                ctx = ctxs[i]
+                                rate = float(ctx.get("funding", 0))
+                                results[name]["funding_hyperliquid"] = rate
+                                logger.debug(f"  ✅ Hyperliquid {name}: {rate*100:.4f}%")
+                else:
+                    logger.warning(f"  ❌ Hyperliquid HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"  ❌ Hyperliquid: {type(e).__name__}: {e}")
 
     return results
 
@@ -246,14 +254,13 @@ async def fetch_onchain_flows() -> dict:
 # 4. 고래 지갑 추적 (Etherscan — 무료 API)
 # ══════════════════════════════════════════════════════
 
-# 유명 고래/스마트머니 지갑 (검증된 공개 주소)
+# 유명 고래/스마트머니 지갑 (검증된 주소 — 2026년 기준)
 WHALE_WALLETS = {
-    "Binance 1": "0xF977814e90dA44bFA03b6295A0616a897441aceC",       # Binance 14 (수십만 ETH)
-    "Binance 2": "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8",       # Binance 7
-    "Kraken": "0x2910543Af39abA0Cd09dBb2D50200b3E800A63D2",          # Kraken 4
-    "Robinhood": "0xE93381fB4c4F14bDa253907b18faD305D799241a",       # Robinhood
-    "Vitalik": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",         # Vitalik.eth
-    "Ethereum Foundation": "0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe",
+    "Binance 14": "0xF977814e90dA44bFA03b6295A0616a897441aceC",       # 수십만 ETH
+    "Binance 7": "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8",        # 대량 ETH
+    "Beacon Deposit": "0x00000000219ab540356cBB839Cbe05303d7705Fa",   # ETH 2.0 staking (최대)
+    "Arbitrum Bridge": "0x8315177aB297bA92A06054cE80a67Ed4DBd7ed3a",  # L2 브리지
+    "Vitalik": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",          # Vitalik.eth
 }
 
 async def fetch_whale_activity(etherscan_key: str) -> dict:
