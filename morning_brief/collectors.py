@@ -77,77 +77,74 @@ async def fetch_fear_greed_index() -> dict:
 # ══════════════════════════════════════════════════════
 
 async def fetch_price_and_funding(okx_exchange) -> dict:
-    """BTC/ETH 가격 + 펀딩비 크로스 비교"""
-    try:
-        import ccxt.async_support as ccxt
+    """BTC/ETH 가격 + 펀딩비 크로스 비교 (공식 HTTP API 직접 호출)"""
+    results = {"BTC": {}, "ETH": {}}
 
-        results = {"BTC": {}, "ETH": {}}
-
-        # OKX (기존 클라이언트 재사용)
-        for sym, key in [("BTC/USDT:USDT", "BTC"), ("ETH/USDT:USDT", "ETH")]:
-            try:
-                ticker = await okx_exchange.get_ticker(sym) if okx_exchange else None
-                if ticker:
-                    results[key]["price"] = ticker.get("last", 0)
-                    results[key]["change_24h"] = ticker.get("change_24h_pct", 0)
-                    results[key]["high_24h"] = ticker.get("high_24h", 0)
-                    results[key]["low_24h"] = ticker.get("low_24h", 0)
-
-                    # 펀딩비 (OKX)
-                    funding = await okx_exchange.get_funding_rate(sym)
-                    if funding:
-                        results[key]["funding_okx"] = funding.get("funding_rate", 0)
-            except Exception as e:
-                logger.warning(f"OKX {sym} 데이터 실패: {e}")
-
-        # Binance / Bybit 펀딩비 (공개 API, 키 불필요)
-        binance = ccxt.binance({"options": {"defaultType": "swap"}, "enableRateLimit": True})
-        bybit = ccxt.bybit({"options": {"defaultType": "swap"}, "enableRateLimit": True})
-
+    # ── OKX (기존 클라이언트) ─────────────────────────
+    for sym, key in [("BTC/USDT:USDT", "BTC"), ("ETH/USDT:USDT", "ETH")]:
         try:
-            # 마켓 로드 먼저 (심볼 정규화)
+            ticker = await okx_exchange.get_ticker(sym) if okx_exchange else None
+            if ticker:
+                results[key]["price"] = ticker.get("last", 0)
+                results[key]["change_24h"] = ticker.get("change_24h_pct", 0)
+                results[key]["high_24h"] = ticker.get("high_24h", 0)
+                results[key]["low_24h"] = ticker.get("low_24h", 0)
+                funding = await okx_exchange.get_funding_rate(sym)
+                if funding:
+                    results[key]["funding_okx"] = funding.get("funding_rate", 0)
+        except Exception as e:
+            logger.warning(f"OKX {sym} 실패: {e}")
+
+    # ── Binance 펀딩비 (공식 HTTP API) ────────────────
+    # https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT
+    async with aiohttp.ClientSession() as session:
+        for sym_bin, sym_key in [("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")]:
+            # Binance
             try:
-                await binance.load_markets()
+                async with session.get(
+                    "https://fapi.binance.com/fapi/v1/premiumIndex",
+                    params={"symbol": sym_bin},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={"User-Agent": "Mozilla/5.0"},
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        rate = float(data.get("lastFundingRate", 0))
+                        results[sym_key]["funding_binance"] = rate
+                        logger.debug(f"  ✅ Binance {sym_bin}: {rate*100:.4f}%")
+                    else:
+                        logger.warning(f"  ❌ Binance {sym_bin} HTTP {resp.status}")
+                        results[sym_key]["funding_binance"] = 0
             except Exception as e:
-                logger.debug(f"Binance load_markets 실패: {e}")
+                logger.warning(f"  ❌ Binance {sym_bin}: {type(e).__name__}: {e}")
+                results[sym_key]["funding_binance"] = 0
+
+            # Bybit V5 API
+            # https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT
             try:
-                await bybit.load_markets()
+                async with session.get(
+                    "https://api.bybit.com/v5/market/tickers",
+                    params={"category": "linear", "symbol": sym_bin},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={"User-Agent": "Mozilla/5.0"},
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        rlist = data.get("result", {}).get("list", [])
+                        if rlist:
+                            rate = float(rlist[0].get("fundingRate", 0))
+                            results[sym_key]["funding_bybit"] = rate
+                            logger.debug(f"  ✅ Bybit {sym_bin}: {rate*100:.4f}%")
+                        else:
+                            results[sym_key]["funding_bybit"] = 0
+                    else:
+                        logger.warning(f"  ❌ Bybit {sym_bin} HTTP {resp.status}")
+                        results[sym_key]["funding_bybit"] = 0
             except Exception as e:
-                logger.debug(f"Bybit load_markets 실패: {e}")
+                logger.warning(f"  ❌ Bybit {sym_bin}: {type(e).__name__}: {e}")
+                results[sym_key]["funding_bybit"] = 0
 
-            for sym_unified, sym_key in [("BTC/USDT:USDT", "BTC"), ("ETH/USDT:USDT", "ETH")]:
-                # Binance — unified symbol 사용
-                try:
-                    bn_fund = await binance.fetch_funding_rate(sym_unified)
-                    rate = bn_fund.get("fundingRate") or bn_fund.get("info", {}).get("lastFundingRate", 0)
-                    results[sym_key]["funding_binance"] = float(rate) if rate else 0
-                except Exception as e:
-                    logger.debug(f"Binance {sym_unified} 펀딩비 실패: {e}")
-                    results[sym_key]["funding_binance"] = 0
-
-                # Bybit — unified symbol 사용
-                try:
-                    bb_fund = await bybit.fetch_funding_rate(sym_unified)
-                    rate = bb_fund.get("fundingRate") or bb_fund.get("info", {}).get("fundingRate", 0)
-                    results[sym_key]["funding_bybit"] = float(rate) if rate else 0
-                except Exception as e:
-                    logger.debug(f"Bybit {sym_unified} 펀딩비 실패: {e}")
-                    results[sym_key]["funding_bybit"] = 0
-        finally:
-            try:
-                await binance.close()
-            except Exception:
-                pass
-            try:
-                await bybit.close()
-            except Exception:
-                pass
-
-        return results
-
-    except Exception as e:
-        logger.warning(f"가격/펀딩비 수집 실패: {e}")
-        return {"error": str(e)}
+    return results
 
 
 # ══════════════════════════════════════════════════════
@@ -164,24 +161,41 @@ async def fetch_onchain_flows() -> dict:
         tvl_change_7d = 0
 
         async with aiohttp.ClientSession() as session:
-            # 스테이블코인 전체 마켓캡 (+ 24H 변화)
+            # 스테이블코인 시총 + 24H 변화 — CoinGecko 사용 (더 안정적)
+            # USDT + USDC + DAI 3대장만 집계
             try:
                 async with session.get(
-                    "https://stablecoins.llama.fi/stablecoincharts/all",
+                    "https://api.coingecko.com/api/v3/coins/markets",
+                    params={
+                        "vs_currency": "usd",
+                        "ids": "tether,usd-coin,dai,binance-usd,first-digital-usd",
+                        "order": "market_cap_desc",
+                        "per_page": 10,
+                        "page": 1,
+                        "price_change_percentage": "24h",
+                    },
                     timeout=aiohttp.ClientTimeout(total=10),
+                    headers={"User-Agent": "Mozilla/5.0"},
                 ) as resp:
-                    chart = await resp.json()
-                    if chart and len(chart) >= 2:
-                        # 각 항목: {date, totalCirculating: {peggedUSD, ...}}
-                        latest = chart[-1].get("totalCirculating", {})
-                        prev_day = chart[-2].get("totalCirculating", {}) if len(chart) >= 2 else latest
-                        total_mc = latest.get("peggedUSD", 0)
-                        prev_mc = prev_day.get("peggedUSD", 0)
-                        if prev_mc:
-                            stable_change_24h = (total_mc - prev_mc) / prev_mc * 100
+                    if resp.status == 200:
+                        coins = await resp.json()
+                        for c in coins:
+                            mc = c.get("market_cap", 0) or 0
+                            total_mc += mc
+                        # 가중 평균 24H 변화
+                        if total_mc > 0:
+                            weighted = 0
+                            for c in coins:
+                                mc = c.get("market_cap", 0) or 0
+                                ch = c.get("market_cap_change_percentage_24h", 0) or 0
+                                weighted += (mc / total_mc) * ch
+                            stable_change_24h = weighted
+                        logger.debug(f"  ✅ 스테이블코인 시총: ${total_mc/1e9:.1f}B, 24H {stable_change_24h:+.2f}%")
+                    else:
+                        logger.warning(f"  ❌ CoinGecko 스테이블 HTTP {resp.status}")
             except Exception as e:
-                logger.debug(f"스테이블코인 차트 실패: {e}")
-                # fallback: 단순 총액
+                logger.warning(f"  ❌ 스테이블코인 CoinGecko 실패: {type(e).__name__}: {e}")
+                # 폴백: DeFiLlama
                 try:
                     async with session.get(
                         "https://stablecoins.llama.fi/stablecoins",
@@ -232,11 +246,14 @@ async def fetch_onchain_flows() -> dict:
 # 4. 고래 지갑 추적 (Etherscan — 무료 API)
 # ══════════════════════════════════════════════════════
 
-# 유명 고래/스마트머니 지갑 (공개 리스트)
+# 유명 고래/스마트머니 지갑 (검증된 공개 주소)
 WHALE_WALLETS = {
-    "Binance Hot 1": "0x28c6c06298d514db089934071355e5743bf21d60",
-    "Coinbase 10": "0xa090e606e30bd747d4e6245a1517ebe430f0057e",
-    "Kraken 13": "0xdA9dfA130Df4dE4673b89022EE50ff26f6EA73Cf",
+    "Binance 1": "0xF977814e90dA44bFA03b6295A0616a897441aceC",       # Binance 14 (수십만 ETH)
+    "Binance 2": "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8",       # Binance 7
+    "Kraken": "0x2910543Af39abA0Cd09dBb2D50200b3E800A63D2",          # Kraken 4
+    "Robinhood": "0xE93381fB4c4F14bDa253907b18faD305D799241a",       # Robinhood
+    "Vitalik": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",         # Vitalik.eth
+    "Ethereum Foundation": "0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe",
 }
 
 async def fetch_whale_activity(etherscan_key: str) -> dict:
@@ -250,7 +267,7 @@ async def fetch_whale_activity(etherscan_key: str) -> dict:
 
     try:
         async with aiohttp.ClientSession() as session:
-            for name, addr in list(WHALE_WALLETS.items())[:3]:
+            for name, addr in list(WHALE_WALLETS.items())[:4]:
                 try:
                     # Etherscan V2 API (chainid=1은 이더리움)
                     url = "https://api.etherscan.io/v2/api"
