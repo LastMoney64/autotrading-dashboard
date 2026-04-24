@@ -72,6 +72,17 @@ class Settings:
     morning_brief_hour_kst: int = 7   # 아침 7시 KST
     morning_brief_enabled: bool = True
 
+    # ── Polymarket 날씨봇 ──────────────────────────────
+    polymarket_enabled: bool = True
+    polygon_private_key: str = ""
+    polygon_wallet_address: str = ""
+    vc_api_key: str = ""                          # Visual Crossing 날씨 API
+    polymarket_mode: str = "paper"                # "paper" or "live"
+    polymarket_min_ev: float = 0.10               # 최소 10% EV
+    polymarket_max_bet: float = 2.0               # 거래당 최대 $2
+    polymarket_kelly_fraction: float = 0.25       # Kelly의 1/4
+    polymarket_scan_interval: int = 3600          # 60분마다 스캔
+
     def __post_init__(self):
         if not self.db_path:
             self.db_path = str(self.base_dir / "data" / "trading.db")
@@ -94,4 +105,13 @@ class Settings:
             etherscan_api_key=os.getenv("ETHERSCAN_API_KEY", ""),
             morning_brief_hour_kst=int(os.getenv("MORNING_BRIEF_HOUR_KST", "7")),
             morning_brief_enabled=os.getenv("MORNING_BRIEF_ENABLED", "true").lower() == "true",
+            polymarket_enabled=os.getenv("POLYMARKET_ENABLED", "true").lower() == "true",
+            polygon_private_key=os.getenv("POLYGON_PRIVATE_KEY", ""),
+            polygon_wallet_address=os.getenv("POLYGON_WALLET_ADDRESS", ""),
+            vc_api_key=os.getenv("VC_API_KEY", ""),
+            polymarket_mode=os.getenv("POLYMARKET_MODE", "paper"),
+            polymarket_min_ev=float(os.getenv("POLYMARKET_MIN_EV", "0.10")),
+            polymarket_max_bet=float(os.getenv("POLYMARKET_MAX_BET", "2.0")),
+            polymarket_kelly_fraction=float(os.getenv("POLYMARKET_KELLY", "0.25")),
+            polymarket_scan_interval=int(os.getenv("POLYMARKET_SCAN_INTERVAL", "3600")),
         )

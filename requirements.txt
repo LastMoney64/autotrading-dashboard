@@ -16,6 +16,11 @@ aiosqlite>=0.19.0
 # Exchange
 ccxt>=4.0.0
 
+# Polymarket (날씨 트레이딩)
+web3>=6.20.0
+eth-account>=0.10.0
+py-clob-client>=0.20.0
+
 # Dashboard
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0

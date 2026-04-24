@@ -32,6 +32,10 @@ from data.signal_filter import SignalFilter
 from data.market_regime import MarketRegimeDetector
 from evolution.trade_feedback import TradeFeedback
 from morning_brief import MorningBriefEngine
+from polymarket_bot import PolymarketWeatherEngine
+from polymarket_bot.polygon_client import PolygonClient
+from polymarket_bot.polymarket_client import PolymarketClient
+from polymarket_bot.weather_oracle import WeatherOracle
 
 # ── 에이전트 임포트 ──────────────────────────────────────
 from agents.analysts.trend_agent import TrendAgent
@@ -392,6 +396,43 @@ async def main_loop(system: dict):
         if settings.morning_brief_enabled else "🌅 모닝 브리프 비활성"
     )
 
+    # ── Polymarket 날씨봇 초기화 ─────────────────────
+    polymarket_engine = None
+    polymarket_last_run = 0  # 마지막 실행 unix timestamp
+    if (settings.polymarket_enabled
+        and settings.polygon_private_key
+        and settings.vc_api_key):
+        try:
+            poly_client = PolygonClient(settings.polygon_private_key)
+            pm_client = PolymarketClient(polygon_client=poly_client)
+            oracle = WeatherOracle(settings.vc_api_key)
+            polymarket_engine = PolymarketWeatherEngine(
+                settings=settings,
+                telegram=telegram,
+                db=db,
+                polygon=poly_client,
+                polymarket=pm_client,
+                oracle=oracle,
+            )
+            polymarket_engine.mode = settings.polymarket_mode
+            polymarket_engine.min_ev = settings.polymarket_min_ev
+            polymarket_engine.max_bet_per_trade = settings.polymarket_max_bet
+            polymarket_engine.kelly_fraction = settings.polymarket_kelly_fraction
+            polymarket_engine.scan_interval = settings.polymarket_scan_interval
+
+            # 초기 설정 (잔고 확인 + 컨트랙트 승인)
+            await polymarket_engine.initialize()
+
+            logger.info(
+                f"🌤️ Polymarket 봇 활성 ({settings.polymarket_mode} mode, "
+                f"{settings.polymarket_scan_interval//60}분마다 스캔)"
+            )
+        except Exception as e:
+            logger.error(f"Polymarket 봇 초기화 실패: {e}", exc_info=True)
+            polymarket_engine = None
+    else:
+        logger.info("🌤️ Polymarket 봇 비활성 (환경변수 없음)")
+
     trades_since_evolution = 0
     scan_count = 0
     trigger_count = 0
@@ -442,6 +483,17 @@ async def main_loop(system: dict):
                         await morning_brief.generate_and_send()
                 except Exception as e:
                     logger.warning(f"모닝 브리프 에러: {e}")
+
+                # ── Polymarket 봇 (60분마다) ─────────────
+                if polymarket_engine:
+                    import time
+                    now_ts = time.time()
+                    if now_ts - polymarket_last_run >= polymarket_engine.scan_interval:
+                        try:
+                            await polymarket_engine.run_cycle()
+                            polymarket_last_run = now_ts
+                        except Exception as e:
+                            logger.warning(f"Polymarket 사이클 에러: {e}")
 
                 # ── 일일 리셋 ────────────────────────────
                 today = _date.today()
