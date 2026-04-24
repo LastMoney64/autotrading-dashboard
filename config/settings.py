@@ -55,6 +55,7 @@ class Settings:
     probation_min_trades: int = 30           # 수습 기간 최소 시뮬 거래
 
     # ── OKX 거래소 ──────────────────────────────────────
+    okx_trading_enabled: bool = False     # OKX 자동매매 활성화 (false = 비활성)
     okx_api_key: str = ""
     okx_api_secret: str = ""
     okx_passphrase: str = ""
@@ -95,6 +96,7 @@ class Settings:
         return cls(
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             trading_pairs=[p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT:USDT,ETH/USDT:USDT").split(",") if p.strip()],
+            okx_trading_enabled=os.getenv("OKX_TRADING_ENABLED", "false").lower() == "true",
             okx_api_key=os.getenv("OKX_API_KEY", ""),
             okx_api_secret=os.getenv("OKX_API_SECRET", ""),
             okx_passphrase=os.getenv("OKX_PASSPHRASE", ""),

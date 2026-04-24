@@ -620,6 +620,14 @@ async def main_loop(system: dict):
                     except Exception as e:
                         logger.debug(f"포지션 동기화 에러: {e}")
 
+                # ── OKX 자동매매 비활성화 시 스킵 ───────
+                if not settings.okx_trading_enabled:
+                    if scan_count % 60 == 0:  # 1시간마다 한 번 로그
+                        logger.info("[OKX] 자동매매 비활성화 (OKX_TRADING_ENABLED=false)")
+                    scan_count += 1
+                    await asyncio.sleep(settings.decision_interval_seconds)
+                    continue
+
                 for pair in settings.trading_pairs:
                     # ═══════════════════════════════════════════
                     # STAGE 1: 지표 스캔 (무료 — 매 60초)
