@@ -32,11 +32,16 @@ CONDITIONAL_TOKENS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 # 승인 대상 (USDC.e + ConditionalTokens)
 SPENDERS = [CTF_EXCHANGE, NEG_RISK_EXCHANGE, ROUTER]
 
-# Polygon 공개 RPC (백업 여러 개)
+# Polygon 공개 RPC (Railway/미국 서버에서도 작동하는 것들)
 RPC_URLS = [
-    "https://polygon-rpc.com",
-    "https://polygon.llamarpc.com",
-    "https://rpc.ankr.com/polygon",
+    "https://polygon-bor-rpc.publicnode.com",          # PublicNode (안정적)
+    "https://polygon.drpc.org",                         # dRPC
+    "https://rpc-mainnet.maticvigil.com",              # MaticVigil
+    "https://rpc.ankr.com/polygon",                     # Ankr
+    "https://polygon.gateway.tenderly.co",             # Tenderly
+    "https://1rpc.io/matic",                            # 1RPC
+    "https://polygon-rpc.com",                          # 공식
+    "https://polygon.llamarpc.com",                    # LlamaRPC
 ]
 
 # ERC20 ABI (필수 메서드만)
@@ -113,16 +118,36 @@ class PolygonClient:
 
     def _connect_rpc(self):
         """여러 RPC 시도하여 연결"""
-        for url in RPC_URLS:
+        # 사용자 정의 RPC가 있으면 우선 사용
+        import os
+        custom_rpc = os.getenv("POLYGON_RPC_URL", "").strip()
+        rpc_list = [custom_rpc] if custom_rpc else []
+        rpc_list.extend(RPC_URLS)
+
+        errors = []
+        for url in rpc_list:
+            if not url:
+                continue
             try:
-                w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 10}))
+                w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 15}))
+                # is_connected() + chain_id 더블 체크
                 if w3.is_connected():
-                    self.w3 = w3
-                    logger.info(f"RPC 연결 성공: {url}")
-                    return
+                    chain_id = w3.eth.chain_id
+                    if chain_id == 137:  # Polygon mainnet
+                        self.w3 = w3
+                        logger.info(f"✅ Polygon RPC 연결: {url}")
+                        return
+                    else:
+                        errors.append(f"{url}: chain_id={chain_id} (Polygon=137 아님)")
+                else:
+                    errors.append(f"{url}: is_connected=False")
             except Exception as e:
-                logger.warning(f"RPC {url} 실패: {e}")
-        raise RuntimeError("모든 Polygon RPC 연결 실패")
+                errors.append(f"{url}: {type(e).__name__}: {str(e)[:80]}")
+
+        # 전체 실패 시 모든 에러 출력
+        for err in errors:
+            logger.warning(f"  ❌ {err}")
+        raise RuntimeError(f"모든 Polygon RPC 연결 실패 ({len(rpc_list)}개 시도)")
 
     # ──────────────────────────────────────────────
     # 잔고 조회
