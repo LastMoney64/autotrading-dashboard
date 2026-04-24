@@ -82,6 +82,8 @@ class Settings:
     polymarket_max_bet: float = 2.0               # 거래당 최대 $2
     polymarket_kelly_fraction: float = 0.25       # Kelly의 1/4
     polymarket_scan_interval: int = 3600          # 60분마다 스캔
+    polymarket_funder: str = ""                   # Polymarket Proxy 지갑 주소
+    polymarket_signature_type: int = 0            # 0=EOA, 1=Magic, 2=Browser/MetaMask
 
     def __post_init__(self):
         if not self.db_path:
@@ -114,4 +116,6 @@ class Settings:
             polymarket_max_bet=float(os.getenv("POLYMARKET_MAX_BET", "2.0")),
             polymarket_kelly_fraction=float(os.getenv("POLYMARKET_KELLY", "0.25")),
             polymarket_scan_interval=int(os.getenv("POLYMARKET_SCAN_INTERVAL", "3600")),
+            polymarket_funder=os.getenv("POLYGON_FUNDER", ""),
+            polymarket_signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
         )

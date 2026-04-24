@@ -404,7 +404,11 @@ async def main_loop(system: dict):
         and settings.vc_api_key):
         try:
             poly_client = PolygonClient(settings.polygon_private_key)
-            pm_client = PolymarketClient(polygon_client=poly_client)
+            pm_client = PolymarketClient(
+                polygon_client=poly_client,
+                proxy_address=settings.polymarket_funder,
+                signature_type=settings.polymarket_signature_type,
+            )
             oracle = WeatherOracle(settings.vc_api_key)
             polymarket_engine = PolymarketWeatherEngine(
                 settings=settings,

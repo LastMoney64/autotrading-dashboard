@@ -107,13 +107,39 @@ class PolymarketWeatherEngine:
 
             logger.info(f"  EV ≥ {self.min_ev*100:.0f}% 기회: {len(opportunities)}개")
 
-            # 3. 잔고 확인
-            usdc_balance = self.polygon.get_usdc_balance()
-            logger.info(f"  잔고: ${usdc_balance:.2f} USDC.e")
+            # 3. 잔고 확인 (Proxy 우선)
+            proxy_addr = self.polymarket.proxy_address if self.polymarket else ""
+            if proxy_addr:
+                try:
+                    from polymarket_bot.polygon_client import USDC_E, ERC20_ABI
+                    from web3 import Web3
+                    contract = self.polygon.w3.eth.contract(
+                        address=Web3.to_checksum_address(USDC_E), abi=ERC20_ABI
+                    )
+                    usdc_balance = contract.functions.balanceOf(
+                        Web3.to_checksum_address(proxy_addr)
+                    ).call() / 1e6
+                except Exception:
+                    usdc_balance = self.polygon.get_usdc_balance()
+            else:
+                usdc_balance = self.polygon.get_usdc_balance()
 
-            if usdc_balance < 1:
-                logger.warning("  잔고 부족 ($1 미만) — 매매 중지")
-                return
+            logger.info(
+                f"  잔고: ${usdc_balance:.2f} USDC.e "
+                f"({'Proxy' if proxy_addr else 'EOA'}, mode: {self.mode})"
+            )
+
+            # Paper 모드: 잔고 무관하게 시뮬레이션 진행
+            if self.mode == "paper":
+                if usdc_balance < 1:
+                    # 가상 잔고 사용 (페이퍼 트레이딩 시뮬용)
+                    usdc_balance = 50.0
+                    logger.info(f"  📝 Paper 모드 가상 잔고 사용: $50.00")
+            else:
+                # Live 모드: 실제 잔고 필수
+                if usdc_balance < 1:
+                    logger.warning("  ⚠️ 잔고 부족 ($1 미만) — Live 매매 중지")
+                    return
 
             # 4. 우선순위 정렬 (EV 높은 순)
             opportunities.sort(key=lambda x: x["ev_pct"], reverse=True)
@@ -342,13 +368,36 @@ class PolymarketWeatherEngine:
 
     async def initialize(self):
         """봇 시작 시 1회 실행: 컨트랙트 승인"""
-        # 잔고 확인
+        # 잔고 확인 (EOA + Proxy 둘 다)
         status = self.polygon.get_status()
+
+        # Proxy 잔고도 조회 (Polymarket Browser Wallet 모드)
+        proxy_addr = self.polymarket.proxy_address if self.polymarket else ""
+        proxy_usdc = 0
+        if proxy_addr:
+            try:
+                from polymarket_bot.polygon_client import USDC_E, ERC20_ABI
+                from web3 import Web3
+                contract = self.polygon.w3.eth.contract(
+                    address=Web3.to_checksum_address(USDC_E), abi=ERC20_ABI
+                )
+                proxy_usdc = contract.functions.balanceOf(
+                    Web3.to_checksum_address(proxy_addr)
+                ).call() / 1e6
+            except Exception as e:
+                logger.debug(f"Proxy 잔고 조회 실패: {e}")
+
         logger.info(
-            f"💼 Polygon 지갑: {status['address']}\n"
+            f"💼 Polygon 지갑\n"
+            f"  EOA: {status['address']}\n"
+            f"  Proxy: {proxy_addr or '(미설정 — EOA 모드)'}\n"
             f"  POL: {status['pol_balance']:.4f}\n"
-            f"  USDC.e: {status['usdc_balance']:.2f}"
+            f"  USDC.e (EOA): ${status['usdc_balance']:.2f}\n"
+            f"  USDC.e (Proxy): ${proxy_usdc:.2f}"
         )
+
+        # 봇이 사용할 잔고 (Proxy 우선)
+        self._effective_balance = proxy_usdc if proxy_addr else status["usdc_balance"]
 
         if status["pol_balance"] < 0.1:
             logger.warning("⚠️ POL 부족 (0.1 미만) — 가스비 충전 필요")
@@ -366,11 +415,14 @@ class PolymarketWeatherEngine:
                 f"{len(result['failed'])}개 실패"
             )
 
+            proxy_short = f"{proxy_addr[:10]}...{proxy_addr[-6:]}" if proxy_addr else "(EOA 모드)"
             await self.telegram.send(
                 f"🌤️ <b>Polymarket 봇 초기화</b>\n\n"
-                f"<b>지갑:</b> <code>{status['address'][:10]}...{status['address'][-6:]}</code>\n"
+                f"<b>EOA:</b> <code>{status['address'][:10]}...{status['address'][-6:]}</code>\n"
+                f"<b>Proxy:</b> <code>{proxy_short}</code>\n"
                 f"<b>POL:</b> {status['pol_balance']:.4f}\n"
-                f"<b>USDC.e:</b> ${status['usdc_balance']:.2f}\n"
+                f"<b>USDC.e (EOA):</b> ${status['usdc_balance']:.2f}\n"
+                f"<b>USDC.e (Proxy):</b> ${proxy_usdc:.2f}\n"
                 f"<b>컨트랙트 승인:</b> {len(result['approved'])}개 신규\n"
                 f"<b>모드:</b> {self.mode}"
             )

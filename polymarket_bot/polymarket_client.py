@@ -26,11 +26,16 @@ DATA_API = "https://data-api.polymarket.com"    # 가격/볼륨
 class PolymarketClient:
     """Polymarket REST API 통합 클라이언트"""
 
-    def __init__(self, polygon_client=None):
+    def __init__(self, polygon_client=None, proxy_address: str = "", signature_type: int = 0):
         """
         polygon_client: PolygonClient 인스턴스 (서명용)
+        proxy_address: Polymarket Proxy 지갑 주소 (Browser Wallet 사용 시)
+                      비워두면 EOA 직접 거래 (signature_type=0)
+        signature_type: 0 = EOA, 1 = Email/Magic, 2 = Browser Wallet (MetaMask Proxy)
         """
         self.polygon = polygon_client
+        self.proxy_address = proxy_address
+        self.signature_type = signature_type
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -188,11 +193,19 @@ class PolymarketClient:
             from py_clob_client.client import ClobClient
             from py_clob_client.constants import POLYGON
 
-            client = ClobClient(
-                host=CLOB_API,
-                key=self.polygon.account.key.hex() if self.polygon else None,
-                chain_id=POLYGON,
-            )
+            kwargs = {
+                "host": CLOB_API,
+                "key": self.polygon.account.key.hex() if self.polygon else None,
+                "chain_id": POLYGON,
+            }
+
+            # Proxy 사용 (Browser Wallet 모드)
+            if self.proxy_address and self.signature_type in (1, 2):
+                kwargs["signature_type"] = self.signature_type
+                kwargs["funder"] = self.proxy_address
+
+            client = ClobClient(**kwargs)
+
             # API credentials 자동 생성 또는 가져오기
             try:
                 creds = client.create_or_derive_api_creds()
