@@ -86,6 +86,32 @@ class Settings:
     polymarket_funder: str = ""                   # Polymarket Proxy 지갑 주소
     polymarket_signature_type: int = 0            # 0=EOA, 1=Magic, 2=Browser/MetaMask
 
+    # ── 솔라나 밈코인 봇 (3개) ─────────────────────────
+    solana_enabled: bool = True
+    solana_mode: str = "paper"                    # paper or live
+
+    # 봇 1: 스마트머니 카피
+    solana_bot1_enabled: bool = True
+    solana_bot1_private_key: str = ""
+    solana_bot1_wallet: str = ""
+
+    # 봇 2: Pump.fun 졸업 스나이퍼
+    solana_bot2_enabled: bool = True
+    solana_bot2_private_key: str = ""
+    solana_bot2_wallet: str = ""
+
+    # 봇 3: 모멘텀 + 소셜
+    solana_bot3_enabled: bool = True
+    solana_bot3_private_key: str = ""
+    solana_bot3_wallet: str = ""
+
+    # 공통 설정
+    helius_api_key: str = ""
+    birdeye_api_key: str = ""                     # 선택 (무료 티어)
+    solana_max_buy_sol: float = 0.05              # 매수당 최대 0.05 SOL
+    solana_default_slippage_bps: int = 300        # 3% 슬리피지
+    solana_priority_fee_lamports: int = 100000    # 0.0001 SOL 우선 수수료
+
     def __post_init__(self):
         if not self.db_path:
             self.db_path = str(self.base_dir / "data" / "trading.db")
@@ -120,4 +146,21 @@ class Settings:
             polymarket_scan_interval=int(os.getenv("POLYMARKET_SCAN_INTERVAL", "3600")),
             polymarket_funder=os.getenv("POLYGON_FUNDER", ""),
             polymarket_signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+            # 솔라나
+            solana_enabled=os.getenv("SOLANA_ENABLED", "true").lower() == "true",
+            solana_mode=os.getenv("SOLANA_MODE", "paper"),
+            solana_bot1_enabled=os.getenv("SOLANA_BOT1_ENABLED", "true").lower() == "true",
+            solana_bot1_private_key=os.getenv("SOLANA_BOT1_PRIVATE_KEY", ""),
+            solana_bot1_wallet=os.getenv("SOLANA_BOT1_WALLET", "G4MEDsDfzFadeeYxn6UxcYJ2C4fMJPmx1i7UyfQHQmsi"),
+            solana_bot2_enabled=os.getenv("SOLANA_BOT2_ENABLED", "true").lower() == "true",
+            solana_bot2_private_key=os.getenv("SOLANA_BOT2_PRIVATE_KEY", ""),
+            solana_bot2_wallet=os.getenv("SOLANA_BOT2_WALLET", "E1SGnXKMudseFBLE8A6ojpCC5dXjQpSvBhD85ErvPWna"),
+            solana_bot3_enabled=os.getenv("SOLANA_BOT3_ENABLED", "true").lower() == "true",
+            solana_bot3_private_key=os.getenv("SOLANA_BOT3_PRIVATE_KEY", ""),
+            solana_bot3_wallet=os.getenv("SOLANA_BOT3_WALLET", "CZyiWa7TnwMhWVDeaDjc9TDMs51bZqXj3WSTAFBqYmvn"),
+            helius_api_key=os.getenv("HELIUS_API_KEY", ""),
+            birdeye_api_key=os.getenv("BIRDEYE_API_KEY", ""),
+            solana_max_buy_sol=float(os.getenv("SOLANA_MAX_BUY_SOL", "0.05")),
+            solana_default_slippage_bps=int(os.getenv("SOLANA_SLIPPAGE_BPS", "300")),
+            solana_priority_fee_lamports=int(os.getenv("SOLANA_PRIORITY_FEE", "100000")),
         )
