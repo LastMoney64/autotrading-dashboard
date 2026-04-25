@@ -34,12 +34,12 @@ class WalletDiscovery:
         self.helius = helius_client
         self._session: Optional[aiohttp.ClientSession] = None
 
-        # 발굴 기준
-        self.min_trades_30d = 10
-        self.min_win_rate = 0.55
-        self.min_avg_pnl_pct = 30
-        self.max_wallets_to_check = 50  # 한 번에 검사할 지갑 수
-        self.max_new_wallets = 5         # 한 번에 추가할 지갑 수
+        # 발굴 기준 (완화 — 더 많은 통과)
+        self.min_trades_30d = 5         # 10 → 5 (짧은 히스토리도 OK)
+        self.min_win_rate = 0.45         # 55% → 45%
+        self.min_avg_pnl_pct = 15        # 30% → 15%
+        self.max_wallets_to_check = 100  # 50 → 100 (더 많이 검사)
+        self.max_new_wallets = 10         # 5 → 10 (더 많이 추가)
 
     async def _get_session(self):
         if self._session is None or self._session.closed:
@@ -63,10 +63,61 @@ class WalletDiscovery:
 
         Returns: [token_mint, ...]
         """
+        tokens = []
         try:
             session = await self._get_session()
+            # 1. DexScreener boosts (트렌딩)
             url = "https://api.dexscreener.com/token-boosts/latest/v1"
             async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list):
+                        for b in data:
+                            if b.get("chainId") == "solana":
+                                addr = b.get("tokenAddress")
+                                if addr and addr not in tokens:
+                                    tokens.append(addr)
+                            if len(tokens) >= limit:
+                                break
+
+            # 2. DexScreener token-profiles (보충)
+            if len(tokens) < limit:
+                url2 = "https://api.dexscreener.com/token-profiles/latest/v1"
+                async with session.get(url2) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, list):
+                            for p in data:
+                                if p.get("chainId") == "solana":
+                                    addr = p.get("tokenAddress")
+                                    if addr and addr not in tokens:
+                                        tokens.append(addr)
+                                if len(tokens) >= limit:
+                                    break
+
+        except Exception as e:
+            logger.warning(f"트렌딩 토큰 조회 실패: {e}")
+
+        return tokens
+
+    async def get_pumpfun_graduated_tokens(self, limit: int = 15) -> list[str]:
+        """
+        Pump.fun에서 최근 졸업한 토큰 (성공한 밈코인 = 좋은 매수자)
+
+        Returns: [token_mint, ...]
+        """
+        try:
+            session = await self._get_session()
+            # Pump.fun API에서 졸업한(complete=true) 코인
+            url = "https://frontend-api-v3.pump.fun/coins"
+            params = {
+                "offset": 0,
+                "limit": 100,
+                "sort": "market_cap",
+                "order": "DESC",
+                "includeNsfw": "false",
+            }
+            async with session.get(url, params=params) as resp:
                 if resp.status != 200:
                     return []
                 data = await resp.json()
@@ -74,16 +125,17 @@ class WalletDiscovery:
                     return []
 
                 tokens = []
-                for b in data:
-                    if b.get("chainId") == "solana":
-                        addr = b.get("tokenAddress")
-                        if addr:
-                            tokens.append(addr)
+                for c in data:
+                    # 졸업 완료한 + 시총 큰 토큰
+                    if c.get("complete") and c.get("usd_market_cap", 0) > 100000:
+                        mint = c.get("mint")
+                        if mint:
+                            tokens.append(mint)
                     if len(tokens) >= limit:
                         break
                 return tokens
         except Exception as e:
-            logger.warning(f"트렌딩 토큰 조회 실패: {e}")
+            logger.debug(f"Pump.fun 졸업 토큰 조회 실패: {e}")
             return []
 
     # ──────────────────────────────────────────────
@@ -278,13 +330,20 @@ class WalletDiscovery:
 
         existing_addrs = {w["address"] for w in TRACKED_WALLETS}
 
-        # 1. 트렌딩 토큰
-        tokens = await self.get_trending_tokens(limit=15)
-        logger.info(f"  📊 트렌딩 토큰 {len(tokens)}개")
+        # 1. 트렌딩 토큰 (다중 소스)
+        trending = await self.get_trending_tokens(limit=20)
+        graduated = await self.get_pumpfun_graduated_tokens(limit=15)
+
+        # 중복 제거하면서 합침
+        all_tokens = list(dict.fromkeys(trending + graduated))
+        logger.info(
+            f"  📊 토큰 {len(all_tokens)}개 "
+            f"(트렌딩 {len(trending)} + 졸업 {len(graduated)})"
+        )
 
         # 2. 매수자 후보 수집 (중복 제거)
         candidates: set[str] = set()
-        for token in tokens[:10]:
+        for token in all_tokens[:25]:
             try:
                 buyers = await self.get_token_early_buyers(token, limit=15)
                 for b in buyers:
