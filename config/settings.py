@@ -127,6 +127,7 @@ class Settings:
         """환경변수에서 설정 로드"""
         return cls(
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            db_path=os.getenv("DB_PATH", "").strip(),  # Railway Volume 영구 경로 지원
             trading_pairs=[p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT:USDT,ETH/USDT:USDT").split(",") if p.strip()],
             okx_trading_enabled=os.getenv("OKX_TRADING_ENABLED", "false").strip().lower() == "true",
             okx_api_key=os.getenv("OKX_API_KEY", "").strip(),

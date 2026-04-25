@@ -95,6 +95,16 @@ async def initialize_system():
 
     # 인프라
     db = Database(settings.db_path)
+    # ── DB 영구 저장 검증 (Railway 재배포 시 데이터 안 날아가는지) ──
+    import os as _os
+    db_real_path = _os.path.abspath(db.db_path)
+    db_exists = _os.path.exists(db_real_path)
+    db_size = _os.path.getsize(db_real_path) if db_exists else 0
+    logger.info(
+        f"💾 DB 경로: {db_real_path} "
+        f"(존재={db_exists}, 크기={db_size:,}B) "
+        f"{'[Volume 마운트됨]' if db_real_path.startswith('/app/data') or _os.getenv('DB_PATH') else '[⚠️ ephemeral — 재배포 시 리셋]'}"
+    )
     registry = AgentRegistry()
     bus = MessageBus()
 
