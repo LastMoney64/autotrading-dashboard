@@ -37,6 +37,12 @@ from polymarket_bot.polygon_client import PolygonClient
 from polymarket_bot.polymarket_client import PolymarketClient
 from polymarket_bot.weather_oracle import WeatherOracle
 
+# 솔라나 봇 3종
+from solana_bot.shared import SolanaClient, JupiterSwap, HeliusClient, SafetyChecker
+from solana_bot.smart_money_bot import SmartMoneyEngine
+from solana_bot.pumpfun_sniper_bot import PumpFunSniperEngine
+from solana_bot.momentum_social_bot import MomentumSocialEngine
+
 # ── 에이전트 임포트 ──────────────────────────────────────
 from agents.analysts.trend_agent import TrendAgent
 from agents.analysts.momentum_agent import MomentumAgent
@@ -437,6 +443,60 @@ async def main_loop(system: dict):
     else:
         logger.info("🌤️ Polymarket 봇 비활성 (환경변수 없음)")
 
+    # ── 솔라나 봇 3종 초기화 ─────────────────────────
+    solana_engines = {}  # bot_name → engine
+    solana_last_run: dict[str, int] = {}  # bot_name → unix ts
+
+    if settings.solana_enabled and settings.helius_api_key:
+        bot_configs = [
+            ("smart_money", "Bot 1 스마트머니",
+             settings.solana_bot1_enabled, settings.solana_bot1_private_key,
+             settings.solana_bot1_wallet, SmartMoneyEngine),
+            ("pumpfun_sniper", "Bot 2 PumpFun",
+             settings.solana_bot2_enabled, settings.solana_bot2_private_key,
+             settings.solana_bot2_wallet, PumpFunSniperEngine),
+            ("momentum_social", "Bot 3 모멘텀+소셜",
+             settings.solana_bot3_enabled, settings.solana_bot3_private_key,
+             settings.solana_bot3_wallet, MomentumSocialEngine),
+        ]
+
+        for bot_key, bot_name, enabled, pk, wallet, engine_cls in bot_configs:
+            if not enabled or not pk:
+                logger.info(f"🟡 {bot_name} 비활성 (키 없음)")
+                continue
+            try:
+                sol_client = SolanaClient(
+                    private_key=pk,
+                    helius_api_key=settings.helius_api_key,
+                    wallet_address=wallet,
+                )
+                jupiter = JupiterSwap(
+                    solana_client=sol_client,
+                    default_slippage_bps=settings.solana_default_slippage_bps,
+                )
+                helius = HeliusClient(api_key=settings.helius_api_key)
+                safety = SafetyChecker(helius_client=helius)
+
+                engine = engine_cls(
+                    settings=settings,
+                    telegram=telegram,
+                    db=db,
+                    client=sol_client,
+                    jupiter=jupiter,
+                    helius=helius,
+                    safety=safety,
+                )
+
+                # 초기화 (잔고 확인 + 텔레그램 알림)
+                await engine.initialize()
+                solana_engines[bot_key] = engine
+                solana_last_run[bot_key] = 0  # 즉시 첫 실행
+                logger.info(f"✅ {bot_name} 활성 ({engine.scan_interval}초마다)")
+            except Exception as e:
+                logger.error(f"{bot_name} 초기화 실패: {e}", exc_info=True)
+    else:
+        logger.info("🟡 솔라나 봇 비활성 (HELIUS_API_KEY 또는 SOLANA_ENABLED 확인)")
+
     trades_since_evolution = 0
     scan_count = 0
     trigger_count = 0
@@ -498,6 +558,18 @@ async def main_loop(system: dict):
                             polymarket_last_run = now_ts
                         except Exception as e:
                             logger.warning(f"Polymarket 사이클 에러: {e}")
+
+                # ── 솔라나 봇 3종 (각자 주기로) ──────────
+                if solana_engines:
+                    import time
+                    now_ts = time.time()
+                    for bot_key, engine in solana_engines.items():
+                        try:
+                            if now_ts - solana_last_run.get(bot_key, 0) >= engine.scan_interval:
+                                await engine.run_cycle()
+                                solana_last_run[bot_key] = now_ts
+                        except Exception as e:
+                            logger.warning(f"솔라나 [{bot_key}] 사이클 에러: {e}")
 
                 # ── 일일 리셋 ────────────────────────────
                 today = _date.today()
@@ -1087,6 +1159,13 @@ async def main_loop(system: dict):
         polling_task.cancel()
         if okx:
             await okx.close()
+        # 솔라나 봇 정리
+        for bot_key, engine in (solana_engines or {}).items():
+            try:
+                if hasattr(engine, "close"):
+                    await engine.close()
+            except Exception:
+                pass
         db.close()
         logger.info("시스템 종료")
 
