@@ -393,7 +393,7 @@ async def fetch_trending_memes() -> dict:
 # ══════════════════════════════════════════════════════
 
 async def fetch_bot_status(db, feedback, okx_exchange) -> dict:
-    """우리 봇 현재 상태"""
+    """OKX 봇 현재 상태"""
     try:
         # 잔고
         balance = 0
@@ -424,16 +424,169 @@ async def fetch_bot_status(db, feedback, okx_exchange) -> dict:
             "total_pnl_pct": stats.get("total_pnl_pct", 0),
             "consecutive_losses": stats.get("consecutive_losses", 0),
             "open_positions": len(positions),
-            "positions": [
-                {
-                    "symbol": p.get("symbol", ""),
-                    "side": p.get("side", ""),
-                    "size": p.get("size", 0),
-                    "unrealized_pnl": p.get("unrealized_pnl", 0),
-                }
-                for p in positions[:3]
-            ],
         }
     except Exception as e:
         logger.warning(f"봇 상태 수집 실패: {e}")
         return {"error": str(e)}
+
+
+# ══════════════════════════════════════════════════════
+# 7. Polymarket 봇 상태
+# ══════════════════════════════════════════════════════
+
+async def fetch_polymarket_status(db, polymarket_engine) -> dict:
+    """Polymarket 날씨봇 상태"""
+    try:
+        result = {
+            "active": polymarket_engine is not None,
+            "mode": "N/A",
+            "balance_usdce": 0,
+            "balance_pol": 0,
+        }
+
+        if not polymarket_engine:
+            return result
+
+        result["mode"] = polymarket_engine.mode
+
+        # 잔고 (Proxy 우선)
+        try:
+            poly = polymarket_engine.polygon
+            pm = polymarket_engine.polymarket
+            proxy = pm.proxy_address if pm else ""
+
+            if proxy:
+                from polymarket_bot.polygon_client import USDC_E, ERC20_ABI
+                from web3 import Web3
+                contract = poly.w3.eth.contract(
+                    address=Web3.to_checksum_address(USDC_E), abi=ERC20_ABI
+                )
+                result["balance_usdce"] = contract.functions.balanceOf(
+                    Web3.to_checksum_address(proxy)
+                ).call() / 1e6
+            else:
+                result["balance_usdce"] = poly.get_usdc_balance()
+
+            result["balance_pol"] = poly.get_pol_balance()
+        except Exception as e:
+            logger.debug(f"Polymarket 잔고 실패: {e}")
+
+        # DB에서 어제 거래 통계
+        try:
+            from datetime import datetime, timezone, timedelta
+            kst = timezone(timedelta(hours=9))
+            yesterday = (datetime.now(kst) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+            row = db.conn.execute(
+                """SELECT COUNT(*) as cnt FROM polymarket_trades
+                   WHERE date(timestamp) = ?""",
+                (yesterday,),
+            ).fetchone()
+            result["yesterday_trades"] = row["cnt"] if row else 0
+
+            row_total = db.conn.execute(
+                "SELECT COUNT(*) as cnt FROM polymarket_trades"
+            ).fetchone()
+            result["total_trades"] = row_total["cnt"] if row_total else 0
+        except Exception:
+            result["yesterday_trades"] = 0
+            result["total_trades"] = 0
+
+        return result
+    except Exception as e:
+        logger.warning(f"Polymarket 상태 실패: {e}")
+        return {"active": False, "error": str(e)}
+
+
+# ══════════════════════════════════════════════════════
+# 8. 솔라나 봇 3종 상태
+# ══════════════════════════════════════════════════════
+
+async def fetch_solana_status(db, solana_engines: dict) -> dict:
+    """솔라나 봇 3종 상태"""
+    try:
+        from datetime import datetime, timezone, timedelta
+        kst = timezone(timedelta(hours=9))
+        yesterday = (datetime.now(kst) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        bot_results = {}
+
+        # 봇 키 → DB 테이블 매핑
+        bot_tables = {
+            "smart_money": "smart_money_trades",
+            "pumpfun_sniper": "pumpfun_trades",
+            "momentum_social": "momentum_social_trades",
+        }
+
+        bot_emojis = {
+            "smart_money": "🐋",
+            "pumpfun_sniper": "💎",
+            "momentum_social": "📈",
+        }
+        bot_names = {
+            "smart_money": "SmartMoney",
+            "pumpfun_sniper": "PumpFun",
+            "momentum_social": "Momentum",
+        }
+
+        for bot_key, engine in (solana_engines or {}).items():
+            try:
+                # SOL 잔고
+                sol_balance = await engine.client.get_sol_balance()
+
+                # DB 어제 거래
+                table = bot_tables.get(bot_key, "")
+                yesterday_trades = 0
+                yesterday_pnl = 0
+                wins = 0
+                losses = 0
+
+                if table:
+                    rows = db.conn.execute(
+                        f"""SELECT COUNT(*) as cnt FROM {table}
+                            WHERE date(timestamp) = ?""",
+                        (yesterday,),
+                    ).fetchone()
+                    yesterday_trades = rows["cnt"] if rows else 0
+
+                    # 매도 거래 PnL
+                    pnl_rows = db.conn.execute(
+                        f"""SELECT pnl_pct FROM {table}
+                            WHERE date(timestamp) = ? AND side = 'SELL'""",
+                        (yesterday,),
+                    ).fetchall()
+                    if pnl_rows:
+                        for r in pnl_rows:
+                            pct = r["pnl_pct"] or 0
+                            yesterday_pnl += pct
+                            if pct > 0:
+                                wins += 1
+                            else:
+                                losses += 1
+
+                bot_results[bot_key] = {
+                    "name": bot_names.get(bot_key, bot_key),
+                    "emoji": bot_emojis.get(bot_key, "🤖"),
+                    "active": True,
+                    "mode": engine.mode,
+                    "sol_balance": sol_balance,
+                    "wallet_short": engine.client.get_status()["address_short"],
+                    "open_positions": len(engine.positions) if hasattr(engine, "positions") else 0,
+                    "yesterday_trades": yesterday_trades,
+                    "yesterday_pnl_pct": yesterday_pnl,
+                    "yesterday_wins": wins,
+                    "yesterday_losses": losses,
+                }
+            except Exception as e:
+                logger.debug(f"솔라나 봇 {bot_key} 상태 실패: {e}")
+                bot_results[bot_key] = {
+                    "name": bot_names.get(bot_key, bot_key),
+                    "emoji": bot_emojis.get(bot_key, "🤖"),
+                    "active": False,
+                    "error": str(e)[:50],
+                }
+
+        return bot_results
+    except Exception as e:
+        logger.warning(f"솔라나 상태 수집 실패: {e}")
+        return {}

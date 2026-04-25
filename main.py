@@ -497,6 +497,10 @@ async def main_loop(system: dict):
     else:
         logger.info("🟡 솔라나 봇 비활성 (HELIUS_API_KEY 또는 SOLANA_ENABLED 확인)")
 
+    # 모닝브리프에 봇들 연결 (모든 초기화 끝난 후)
+    morning_brief.polymarket_engine = polymarket_engine
+    morning_brief.solana_engines = solana_engines
+
     trades_since_evolution = 0
     scan_count = 0
     trigger_count = 0

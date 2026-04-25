@@ -15,6 +15,8 @@ from morning_brief.collectors import (
     fetch_whale_activity,
     fetch_trending_memes,
     fetch_bot_status,
+    fetch_polymarket_status,
+    fetch_solana_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,12 +26,15 @@ KST = timezone(timedelta(hours=9))
 class MorningBriefEngine:
     """매일 아침 7시 KST 자동 브리핑"""
 
-    def __init__(self, settings, okx, feedback, db, telegram):
+    def __init__(self, settings, okx, feedback, db, telegram,
+                 polymarket_engine=None, solana_engines=None):
         self.settings = settings
         self.okx = okx
         self.feedback = feedback
         self.db = db
         self.telegram = telegram
+        self.polymarket_engine = polymarket_engine
+        self.solana_engines = solana_engines or {}
         self._last_run_date = None
 
     async def should_run_now(self) -> bool:
@@ -57,10 +62,12 @@ class MorningBriefEngine:
             fetch_whale_activity(self.settings.etherscan_api_key),
             fetch_trending_memes(),
             fetch_bot_status(self.db, self.feedback, self.okx),
+            fetch_polymarket_status(self.db, self.polymarket_engine),
+            fetch_solana_status(self.db, self.solana_engines),
             return_exceptions=True,
         )
 
-        fg, price, onchain, whales, memes, bot = results
+        fg, price, onchain, whales, memes, bot, polymarket, solana = results
 
         # 예외면 빈 dict로 대체
         for i, r in enumerate(results):
@@ -74,13 +81,16 @@ class MorningBriefEngine:
             whales if not isinstance(whales, Exception) else {},
             memes if not isinstance(memes, Exception) else {},
             bot if not isinstance(bot, Exception) else {},
+            polymarket if not isinstance(polymarket, Exception) else {},
+            solana if not isinstance(solana, Exception) else {},
         )
 
         await self.telegram.send(message)
         self._last_run_date = datetime.now(KST).date()
         logger.info("✅ 모닝 브리프 발송 완료")
 
-    def _format_brief(self, fg, price, onchain, whales, memes, bot) -> str:
+    def _format_brief(self, fg, price, onchain, whales, memes, bot,
+                      polymarket=None, solana=None) -> str:
         """텔레그램 HTML 포맷"""
         now_kst = datetime.now(KST)
         date_str = now_kst.strftime("%m월 %d일 %H:%M KST")
@@ -179,25 +189,66 @@ class MorningBriefEngine:
             lines.append("데이터 수집 중")
         lines.append("")
 
-        # ── 7. 우리 봇 상태 ────────────────────────
-        lines.append("🤖 <b>우리 봇 상태</b>")
-        if bot.get("balance_usd") is not None:
-            lines.append(f"잔고: <b>${bot['balance_usd']:.2f}</b>")
-            lines.append(
-                f"승률: {bot.get('win_rate', 0)*100:.0f}% "
-                f"({bot.get('wins', 0)}승/{bot.get('losses', 0)}패)"
-            )
-            lines.append(f"누적 PnL: {bot.get('total_pnl_pct', 0):+.2f}%")
+        # ── 7. 운영 봇 현황 (전체 통합) ──────────────
+        lines.append("🤖 <b>운영 봇 현황</b>")
+
+        # OKX 봇 (비활성 시 표시 안 함)
+        if self.settings.okx_trading_enabled and bot.get("balance_usd") is not None:
+            lines.append("")
+            lines.append("📊 <b>OKX 선물</b>")
+            lines.append(f"  잔고: ${bot['balance_usd']:.2f}")
+            wr = bot.get("win_rate", 0) * 100
+            lines.append(f"  승률: {wr:.0f}% ({bot.get('wins', 0)}승/{bot.get('losses', 0)}패)")
+            lines.append(f"  누적 PnL: {bot.get('total_pnl_pct', 0):+.2f}%")
             if bot.get("consecutive_losses", 0) >= 3:
-                lines.append(f"⚠️ 연속 {bot['consecutive_losses']}패 — 주의")
-            if bot.get("open_positions"):
-                lines.append(f"활성 포지션: {bot['open_positions']}개")
-        else:
-            lines.append("데이터 수집 중")
+                lines.append(f"  ⚠️ 연속 {bot['consecutive_losses']}패")
+
+        # Polymarket
+        if polymarket and polymarket.get("active"):
+            lines.append("")
+            lines.append(f"🌤️ <b>Polymarket 날씨봇</b> ({polymarket.get('mode', '?')})")
+            lines.append(f"  USDC.e: ${polymarket.get('balance_usdce', 0):.2f}")
+            lines.append(f"  POL: {polymarket.get('balance_pol', 0):.2f}")
+            lines.append(
+                f"  거래: 어제 {polymarket.get('yesterday_trades', 0)}건 "
+                f"/ 누적 {polymarket.get('total_trades', 0)}건"
+            )
+
+        # 솔라나 봇 3종
+        if solana:
+            for bot_key, info in solana.items():
+                if not info.get("active"):
+                    continue
+                emoji = info.get("emoji", "🤖")
+                name = info.get("name", bot_key)
+                lines.append("")
+                lines.append(f"{emoji} <b>{name}</b> ({info.get('mode', '?')})")
+                lines.append(f"  지갑: <code>{info.get('wallet_short', '?')}</code>")
+                lines.append(f"  SOL: {info.get('sol_balance', 0):.4f}")
+                trades = info.get("yesterday_trades", 0)
+                wins = info.get("yesterday_wins", 0)
+                losses = info.get("yesterday_losses", 0)
+                pnl = info.get("yesterday_pnl_pct", 0)
+
+                if trades > 0:
+                    sells_total = wins + losses
+                    if sells_total > 0:
+                        wr = wins / sells_total * 100
+                        lines.append(f"  어제: {trades}건 (✅{wins}/❌{losses}, 승률 {wr:.0f}%)")
+                    else:
+                        lines.append(f"  어제: {trades}건 (매수만)")
+                    if abs(pnl) > 0.01:
+                        lines.append(f"  어제 PnL: {pnl:+.2f}%")
+                else:
+                    lines.append(f"  어제: 거래 없음")
+
+                if info.get("open_positions"):
+                    lines.append(f"  보유: {info['open_positions']}개")
+
         lines.append("")
 
         # ── 8. 오늘의 전략 (AI 요약) ───────────────
-        strategy = self._derive_strategy(fg, price, onchain, bot)
+        strategy = self._derive_strategy(fg, price, onchain, bot, polymarket, solana)
         if strategy:
             lines.append("💡 <b>오늘의 전략</b>")
             for s in strategy:
@@ -205,7 +256,7 @@ class MorningBriefEngine:
 
         return "\n".join(lines)
 
-    def _derive_strategy(self, fg, price, onchain, bot) -> list[str]:
+    def _derive_strategy(self, fg, price, onchain, bot, polymarket=None, solana=None) -> list[str]:
         """코드 기반 전략 도출 (AI 호출 없음 — 비용 $0)"""
         tips = []
 
@@ -232,11 +283,41 @@ class MorningBriefEngine:
 
         # 봇 연패
         if bot.get("consecutive_losses", 0) >= 3:
-            tips.append("연패 중 — 진입 기준 강화, 확신도 높은 신호만")
+            tips.append("OKX 연패 중 — 진입 기준 강화, 확신도 높은 신호만")
 
         # TVL 하락
         if onchain.get("tvl_change_24h_pct", 0) < -3:
             tips.append("DeFi TVL 급락 → 위험 자산 회피 모드")
+
+        # 솔라나 봇별 추천
+        if solana:
+            for bot_key, info in solana.items():
+                if not info.get("active"):
+                    continue
+                trades = info.get("yesterday_trades", 0)
+                pnl = info.get("yesterday_pnl_pct", 0)
+                name = info.get("name", "")
+                emoji = info.get("emoji", "🤖")
+
+                if trades > 0 and pnl > 50:
+                    tips.append(f"{emoji} {name} 어제 PnL +{pnl:.0f}% — 좋은 흐름")
+                elif trades > 0 and pnl < -30:
+                    tips.append(f"{emoji} {name} 어제 PnL {pnl:.0f}% — 파라미터 점검 필요")
+
+        # 밈코인 시장 활발도
+        if memes := None:
+            pass  # placeholder
+
+        # 모드별 추천
+        modes = []
+        if polymarket and polymarket.get("mode") == "paper":
+            modes.append("Polymarket")
+        if solana:
+            paper_solana = [s.get("name") for s in solana.values() if s.get("mode") == "paper"]
+            if paper_solana:
+                modes.extend(paper_solana)
+        if modes and len(modes) >= 2:
+            tips.append(f"📝 Paper 검증 중: {', '.join(modes[:3])}")
 
         if not tips:
             tips.append("뚜렷한 극단 신호 없음 — 기존 전략 유지")
