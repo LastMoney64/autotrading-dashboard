@@ -473,6 +473,17 @@ async def main_loop(system: dict):
     )
 
     if settings.solana_enabled and settings.helius_api_key:
+        # ── 봇별 안전 필터 차등 설정 ───────────────────
+        # 솔라나 밈코인 95%가 상위10 30%+ — 봇 특성에 맞게 완화
+        # SmartMoney: 추적 지갑이 1차 검증 → 40%
+        # PumpFun: 졸업 직전 = 본질적으로 집중됨 → 60%
+        # Momentum: 거래량+소셜 검증 → 45%
+        safety_configs = {
+            "smart_money":     {"max_top10_percent": 40.0, "min_lp_usd": 5000, "min_volume_24h_usd": 1000},
+            "pumpfun_sniper":  {"max_top10_percent": 60.0, "min_lp_usd": 3000, "min_volume_24h_usd": 500},
+            "momentum_social": {"max_top10_percent": 45.0, "min_lp_usd": 5000, "min_volume_24h_usd": 1000},
+        }
+
         bot_configs = [
             ("smart_money", "Bot 1 스마트머니",
              settings.solana_bot1_enabled, settings.solana_bot1_private_key,
@@ -500,7 +511,15 @@ async def main_loop(system: dict):
                     default_slippage_bps=settings.solana_default_slippage_bps,
                 )
                 helius = HeliusClient(api_key=settings.helius_api_key)
-                safety = SafetyChecker(helius_client=helius)
+                # 봇별 차등 안전 필터
+                safety_cfg = safety_configs.get(bot_key, {})
+                safety = SafetyChecker(helius_client=helius, settings=safety_cfg)
+                logger.info(
+                    f"  🛡️ {bot_name} 안전필터: "
+                    f"top10≤{safety_cfg.get('max_top10_percent', 30)}%, "
+                    f"LP≥${safety_cfg.get('min_lp_usd', 5000)}, "
+                    f"vol≥${safety_cfg.get('min_volume_24h_usd', 1000)}"
+                )
 
                 engine = engine_cls(
                     settings=settings,
