@@ -541,6 +541,50 @@ async def main_loop(system: dict):
             f"📊 주간 리포트 활성 (매주 일요일 {settings.weekly_report_hour_kst}시 KST)"
         )
 
+    # ── 시작 시 즉시 스마트머니 발굴 (1회만) ─────────
+    if wallet_discovery and os.getenv("STARTUP_WALLET_DISCOVERY", "false").strip().lower() == "true":
+        try:
+            await telegram.send(
+                "🔍 <b>스마트머니 지갑 자동 발굴 시작</b>\n\n"
+                "DexScreener 트렌딩 토큰 → Helius로 매수자 분석\n"
+                "30일 거래 분석 후 검증 통과 지갑 자동 추가\n"
+                "<i>(약 3~5분 소요)</i>"
+            )
+            logger.info("🔍 시작 시 스마트머니 발굴 실행 중...")
+            discovery_result = await wallet_discovery.discover_and_add()
+
+            if discovery_result.get("added", 0) > 0:
+                msg_lines = [
+                    f"✅ <b>스마트머니 발굴 완료</b>",
+                    "",
+                    f"검사: {discovery_result.get('checked', 0)}개",
+                    f"통과: {discovery_result.get('qualified', 0)}개",
+                    f"추가: {discovery_result.get('added', 0)}개",
+                    "",
+                    "<b>새로 추가된 지갑:</b>",
+                ]
+                for w in discovery_result.get("new_wallets", []):
+                    s = w.get("stats", {})
+                    msg_lines.append(
+                        f"• <code>{w['address'][:8]}...{w['address'][-6:]}</code>"
+                    )
+                    msg_lines.append(
+                        f"  {s.get('trades_30d', 0)}건 / "
+                        f"승률 {s.get('win_rate', 0)*100:.0f}% / "
+                        f"PnL +{s.get('avg_pnl_pct', 0):.0f}%"
+                    )
+                await telegram.send("\n".join(msg_lines))
+            else:
+                await telegram.send(
+                    "🔍 <b>스마트머니 발굴 결과</b>\n\n"
+                    f"검사: {discovery_result.get('checked', 0)}개\n"
+                    f"통과: 0개\n"
+                    "<i>현재 시장 조건에서 검증 통과 지갑 없음</i>"
+                )
+        except Exception as e:
+            logger.error(f"발굴 실패: {e}", exc_info=True)
+            await telegram.send(f"❌ 스마트머니 발굴 에러: {str(e)[:100]}")
+
     trades_since_evolution = 0
     scan_count = 0
     trigger_count = 0
