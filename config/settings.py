@@ -108,6 +108,7 @@ class Settings:
     # 공통 설정
     helius_api_key: str = ""
     birdeye_api_key: str = ""                     # 선택 (무료 티어)
+    gmgn_api_key: str = ""                        # GMGN OpenAPI (스마트머니 발굴용)
     solana_max_buy_sol: float = 0.05              # 매수당 최대 0.05 SOL
     solana_default_slippage_bps: int = 300        # 3% 슬리피지
     solana_priority_fee_lamports: int = 100000    # 0.0001 SOL 우선 수수료
@@ -165,6 +166,7 @@ class Settings:
             solana_bot3_wallet=os.getenv("SOLANA_BOT3_WALLET", "CZyiWa7TnwMhWVDeaDjc9TDMs51bZqXj3WSTAFBqYmvn").strip(),
             helius_api_key=os.getenv("HELIUS_API_KEY", "").strip(),
             birdeye_api_key=os.getenv("BIRDEYE_API_KEY", "").strip(),
+            gmgn_api_key=os.getenv("GMGN_API_KEY", "").strip(),
             solana_max_buy_sol=float(os.getenv("SOLANA_MAX_BUY_SOL", "0.05").strip()),
             solana_default_slippage_bps=int(os.getenv("SOLANA_SLIPPAGE_BPS", "300").strip()),
             solana_priority_fee_lamports=int(os.getenv("SOLANA_PRIORITY_FEE", "100000").strip()),

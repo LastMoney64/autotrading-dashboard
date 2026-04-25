@@ -22,7 +22,7 @@ import time
 from typing import Optional
 import aiohttp
 
-from solana_bot.shared import HeliusClient
+from solana_bot.shared import HeliusClient, GmgnClient
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,13 @@ logger = logging.getLogger(__name__)
 class WalletDiscovery:
     """스마트머니 지갑 자동 발굴"""
 
-    def __init__(self, helius_client: HeliusClient):
+    def __init__(
+        self,
+        helius_client: HeliusClient,
+        gmgn_client: Optional[GmgnClient] = None,
+    ):
         self.helius = helius_client
+        self.gmgn = gmgn_client
         self._session: Optional[aiohttp.ClientSession] = None
 
         # 발굴 기준 (완화 — 더 많은 통과)
@@ -40,6 +45,9 @@ class WalletDiscovery:
         self.min_avg_pnl_pct = 15        # 30% → 15%
         self.max_wallets_to_check = 100  # 50 → 100 (더 많이 검사)
         self.max_new_wallets = 10         # 5 → 10 (더 많이 추가)
+
+        # GMGN 검증된 지갑 우선 추가 (최대)
+        self.max_gmgn_direct_add = 15    # GMGN 검증된 지갑은 직접 추가 (검증 스킵)
 
     async def _get_session(self):
         if self._session is None or self._session.closed:
@@ -312,23 +320,136 @@ class WalletDiscovery:
     # 4. 발굴 + 추가
     # ──────────────────────────────────────────────
 
+    # ──────────────────────────────────────────────
+    # 4-A. GMGN 검증된 스마트머니 직접 가져오기 (NEW)
+    # ──────────────────────────────────────────────
+
+    async def discover_from_gmgn(self) -> list[dict]:
+        """
+        GMGN 알고리즘이 이미 검증한 스마트머니 지갑 가져오기
+
+        - smartmoney 거래 (smart_degen 태그)
+        - kol 거래 (KOL 태그)
+        매수 거래만 필터링 → 매수 활동 활발한 지갑 우선
+
+        Returns: [
+            {"address": str, "tag": str, "name": str, "trades": int}, ...
+        ]
+        """
+        if not self.gmgn:
+            return []
+
+        all_wallets: dict[str, dict] = {}
+
+        # 1. Smart Money 매수 거래 (가장 강한 시그널)
+        try:
+            sm_trades = await self.gmgn.get_smart_money_trades(chain="sol", limit=200)
+            sm_wallets = GmgnClient.extract_buy_wallets(sm_trades)
+            for w in sm_wallets:
+                all_wallets[w["address"]] = w
+            logger.info(f"  🎯 GMGN Smart Money: 거래 {len(sm_trades)}건 → 지갑 {len(sm_wallets)}개")
+        except Exception as e:
+            logger.warning(f"GMGN smartmoney 조회 실패: {e}")
+
+        # 2. KOL 매수 거래 (보조 시그널)
+        try:
+            kol_trades = await self.gmgn.get_kol_trades(chain="sol", limit=200)
+            kol_wallets = GmgnClient.extract_buy_wallets(kol_trades)
+            for w in kol_wallets:
+                # smart_money에 이미 있으면 smart_money 태그 우선
+                if w["address"] not in all_wallets:
+                    all_wallets[w["address"]] = w
+            logger.info(f"  🎤 GMGN KOL: 거래 {len(kol_trades)}건 → 지갑 {len(kol_wallets)}개")
+        except Exception as e:
+            logger.warning(f"GMGN KOL 조회 실패: {e}")
+
+        # 거래 활성도 순 정렬
+        return sorted(all_wallets.values(), key=lambda w: w["trades"], reverse=True)
+
+    # ──────────────────────────────────────────────
+    # 4-B. 통합 발굴 + 추가
+    # ──────────────────────────────────────────────
+
     async def discover_and_add(self) -> dict:
         """
-        전체 발굴 프로세스:
-        1. 트렌딩 토큰 → 매수자 후보
-        2. 각 후보 30일 분석
-        3. 기준 통과한 지갑 → wallets.py에 추가
+        전체 발굴 프로세스 (3단계):
+
+        1단계: GMGN 검증된 지갑 직접 추가 (smart_degen 태그)
+        2단계: 트렌딩 토큰 → 매수자 → 30일 분석 (보강)
+        3단계: 기준 통과한 지갑 추가
 
         Returns: {
-            "checked": int,
-            "qualified": int,
-            "added": int,
-            "new_wallets": [{"address": str, "stats": dict}, ...]
+            "gmgn_added": int,           # GMGN 직접 추가 (검증 스킵)
+            "checked": int,              # Helius 분석 검사 수
+            "qualified": int,            # 검증 통과
+            "added": int,                # 총 추가 지갑 수
+            "new_wallets": [...]
         }
         """
         from solana_bot.smart_money_bot.wallets import TRACKED_WALLETS
 
         existing_addrs = {w["address"] for w in TRACKED_WALLETS}
+        new_wallets_added: list[dict] = []
+
+        # ════════════════════════════════════════════════
+        # 1단계: GMGN 직접 추가 (검증된 지갑이라 분석 스킵)
+        # ════════════════════════════════════════════════
+        gmgn_added = 0
+        if self.gmgn:
+            logger.info("  🎯 GMGN OpenAPI에서 검증된 지갑 가져오기")
+            gmgn_wallets = await self.discover_from_gmgn()
+            logger.info(f"  📥 GMGN 후보 {len(gmgn_wallets)}개")
+
+            for w in gmgn_wallets[: self.max_gmgn_direct_add]:
+                if w["address"] in existing_addrs:
+                    continue
+
+                # GMGN이 이미 검증한 지갑 — 즉시 추가
+                tag = w.get("tag", "smart_money")
+                # 초기 win_rate는 태그 기반 추정
+                initial_wr = 0.65 if tag == "smart_degen" else 0.55
+
+                new_wallet = {
+                    "address": w["address"],
+                    "tag": f"gmgn_{tag}",
+                    "win_rate": initial_wr,
+                    "weight": 1.0,
+                    "active": True,
+                }
+                TRACKED_WALLETS.append(new_wallet)
+                existing_addrs.add(w["address"])
+                new_wallets_added.append({
+                    "address": w["address"],
+                    "stats": {
+                        "source": "gmgn",
+                        "tag": tag,
+                        "name": w.get("name", ""),
+                        "trades": w.get("trades", 0),
+                        "win_rate": initial_wr,
+                    },
+                })
+                gmgn_added += 1
+                logger.info(
+                    f"  ✅ GMGN 추가: {w['address'][:10]}... "
+                    f"(태그={tag}, 거래={w.get('trades',0)}회"
+                    f"{', '+w['name'] if w.get('name') else ''})"
+                )
+        else:
+            logger.info("  ⚠️ GMGN 클라이언트 없음 — DexScreener 단독 모드")
+
+        # ════════════════════════════════════════════════
+        # 2단계: DexScreener + Pump.fun 토큰 매수자 분석 (보강)
+        # ════════════════════════════════════════════════
+        # GMGN으로 충분히 채웠으면 스킵
+        if gmgn_added >= self.max_new_wallets:
+            logger.info(f"  GMGN으로 {gmgn_added}개 추가됨 — Helius 분석 스킵")
+            return {
+                "gmgn_added": gmgn_added,
+                "checked": 0,
+                "qualified": gmgn_added,
+                "added": gmgn_added,
+                "new_wallets": new_wallets_added,
+            }
 
         # 1. 트렌딩 토큰 (다중 소스)
         trending = await self.get_trending_tokens(limit=20)
@@ -355,12 +476,14 @@ class WalletDiscovery:
                 continue
             await asyncio.sleep(0.5)
 
-        candidates = list(candidates)[:self.max_wallets_to_check]
-        logger.info(f"  🔍 후보 지갑 {len(candidates)}개 분석 시작")
+        candidates_list = list(candidates)[:self.max_wallets_to_check]
+        logger.info(f"  🔍 후보 지갑 {len(candidates_list)}개 분석 시작")
 
         # 3. 각 지갑 분석
         qualified = []
-        for i, wallet in enumerate(candidates):
+        remaining_slots = self.max_new_wallets - gmgn_added
+
+        for i, wallet in enumerate(candidates_list):
             try:
                 stats = await self.analyze_wallet(wallet)
                 if stats and stats.get("qualifies"):
@@ -371,17 +494,18 @@ class WalletDiscovery:
                         f"승률 {stats['win_rate']:.0%}, "
                         f"평균 PnL {stats['avg_pnl_pct']:.0f}%)"
                     )
-                if len(qualified) >= self.max_new_wallets:
+                if len(qualified) >= remaining_slots:
                     break
             except Exception:
                 continue
             await asyncio.sleep(0.5)
             if (i + 1) % 10 == 0:
-                logger.info(f"  진행: {i+1}/{len(candidates)} (통과 {len(qualified)})")
+                logger.info(f"  진행: {i+1}/{len(candidates_list)} (통과 {len(qualified)})")
 
-        # 4. wallets.py에 추가
-        new_wallets_added = []
+        # 4. 분석 통과한 지갑 추가
         for stats in qualified:
+            if stats["address"] in existing_addrs:
+                continue
             new_wallet = {
                 "address": stats["address"],
                 "tag": "auto_discovered",
@@ -390,13 +514,15 @@ class WalletDiscovery:
                 "active": True,
             }
             TRACKED_WALLETS.append(new_wallet)
+            existing_addrs.add(stats["address"])
             new_wallets_added.append({
                 "address": stats["address"],
                 "stats": stats,
             })
 
         return {
-            "checked": len(candidates),
+            "gmgn_added": gmgn_added,
+            "checked": len(candidates_list),
             "qualified": len(qualified),
             "added": len(new_wallets_added),
             "new_wallets": new_wallets_added,

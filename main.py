@@ -40,7 +40,7 @@ from polymarket_bot.polymarket_client import PolymarketClient
 from polymarket_bot.weather_oracle import WeatherOracle
 
 # 솔라나 봇 3종
-from solana_bot.shared import SolanaClient, JupiterSwap, HeliusClient, SafetyChecker
+from solana_bot.shared import SolanaClient, JupiterSwap, HeliusClient, SafetyChecker, GmgnClient
 from solana_bot.smart_money_bot import SmartMoneyEngine
 from solana_bot.pumpfun_sniper_bot import PumpFunSniperEngine
 from solana_bot.momentum_social_bot import MomentumSocialEngine
@@ -525,7 +525,11 @@ async def main_loop(system: dict):
             try:
                 from solana_bot.smart_money_bot.wallet_discovery import WalletDiscovery
                 helius = solana_engines["smart_money"].helius
-                wallet_discovery = WalletDiscovery(helius)
+                # GMGN OpenAPI 클라이언트 (있으면 검증된 지갑 직접 가져오기)
+                gmgn = GmgnClient(api_key=settings.gmgn_api_key) if settings.gmgn_api_key else None
+                if gmgn:
+                    logger.info("🎯 GMGN OpenAPI 활성 — 검증된 스마트머니 지갑 직접 발굴")
+                wallet_discovery = WalletDiscovery(helius, gmgn_client=gmgn)
                 logger.info("🔍 스마트머니 자동 발굴 활성")
             except Exception as e:
                 logger.warning(f"지갑 발굴 초기화 실패: {e}")
@@ -545,11 +549,11 @@ async def main_loop(system: dict):
     # ── 시작 시 즉시 스마트머니 발굴 (1회만) ─────────
     if wallet_discovery and os.getenv("STARTUP_WALLET_DISCOVERY", "false").strip().lower() == "true":
         try:
+            sources_msg = "🎯 GMGN 검증된 지갑 + DexScreener 트렌딩" if settings.gmgn_api_key else "DexScreener 트렌딩 + Pump.fun 졸업"
             await telegram.send(
-                "🔍 <b>스마트머니 지갑 자동 발굴 시작</b>\n\n"
-                "DexScreener 트렌딩 토큰 → Helius로 매수자 분석\n"
-                "30일 거래 분석 후 검증 통과 지갑 자동 추가\n"
-                "<i>(약 3~5분 소요)</i>"
+                f"🔍 <b>스마트머니 지갑 자동 발굴 시작</b>\n\n"
+                f"소스: {sources_msg}\n"
+                "<i>(약 1~3분 소요)</i>"
             )
             logger.info("🔍 시작 시 스마트머니 발굴 실행 중...")
             discovery_result = await wallet_discovery.discover_and_add()
@@ -558,29 +562,39 @@ async def main_loop(system: dict):
                 msg_lines = [
                     f"✅ <b>스마트머니 발굴 완료</b>",
                     "",
-                    f"검사: {discovery_result.get('checked', 0)}개",
-                    f"통과: {discovery_result.get('qualified', 0)}개",
-                    f"추가: {discovery_result.get('added', 0)}개",
+                    f"🎯 GMGN 직접: {discovery_result.get('gmgn_added', 0)}개",
+                    f"🔍 Helius 분석: {discovery_result.get('checked', 0)}개 검사 → {discovery_result.get('qualified', 0)}개 통과",
+                    f"📥 총 추가: {discovery_result.get('added', 0)}개",
                     "",
                     "<b>새로 추가된 지갑:</b>",
                 ]
                 for w in discovery_result.get("new_wallets", []):
                     s = w.get("stats", {})
+                    src = s.get("source", "")
                     msg_lines.append(
                         f"• <code>{w['address'][:8]}...{w['address'][-6:]}</code>"
                     )
-                    msg_lines.append(
-                        f"  {s.get('trades_30d', 0)}건 / "
-                        f"승률 {s.get('win_rate', 0)*100:.0f}% / "
-                        f"PnL +{s.get('avg_pnl_pct', 0):.0f}%"
-                    )
+                    if src == "gmgn":
+                        # GMGN 직접 추가
+                        name_str = f" ({s.get('name')})" if s.get('name') else ""
+                        msg_lines.append(
+                            f"  🎯 GMGN/{s.get('tag','smart_money')}{name_str} · 매수 {s.get('trades',0)}건"
+                        )
+                    else:
+                        # Helius 분석
+                        msg_lines.append(
+                            f"  📊 {s.get('trades_30d', 0)}건 / "
+                            f"승률 {s.get('win_rate', 0)*100:.0f}% / "
+                            f"PnL +{s.get('avg_pnl_pct', 0):.0f}%"
+                        )
                 await telegram.send("\n".join(msg_lines))
             else:
                 await telegram.send(
                     "🔍 <b>스마트머니 발굴 결과</b>\n\n"
-                    f"검사: {discovery_result.get('checked', 0)}개\n"
+                    f"🎯 GMGN: {discovery_result.get('gmgn_added', 0)}개\n"
+                    f"🔍 Helius 검사: {discovery_result.get('checked', 0)}개\n"
                     f"통과: 0개\n"
-                    "<i>현재 시장 조건에서 검증 통과 지갑 없음</i>"
+                    "<i>(API 키 또는 IPv6 차단 확인)</i>"
                 )
         except Exception as e:
             logger.error(f"발굴 실패: {e}", exc_info=True)
