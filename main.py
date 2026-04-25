@@ -32,6 +32,7 @@ from data.signal_filter import SignalFilter
 from data.market_regime import MarketRegimeDetector
 from evolution.trade_feedback import TradeFeedback
 from morning_brief import MorningBriefEngine
+from weekly_report import WeeklyReportEngine
 from polymarket_bot import PolymarketWeatherEngine
 from polymarket_bot.polygon_client import PolygonClient
 from polymarket_bot.polymarket_client import PolymarketClient
@@ -501,6 +502,32 @@ async def main_loop(system: dict):
     morning_brief.polymarket_engine = polymarket_engine
     morning_brief.solana_engines = solana_engines
 
+    # ── 주간 리포트 + 지갑 자동 발굴 초기화 ──────────
+    weekly_report = None
+    wallet_discovery = None
+    if settings.weekly_report_enabled:
+        # 자동 지갑 발굴 (솔라나 봇에 Helius 있으면)
+        if settings.auto_wallet_discovery and solana_engines.get("smart_money"):
+            try:
+                from solana_bot.smart_money_bot.wallet_discovery import WalletDiscovery
+                helius = solana_engines["smart_money"].helius
+                wallet_discovery = WalletDiscovery(helius)
+                logger.info("🔍 스마트머니 자동 발굴 활성")
+            except Exception as e:
+                logger.warning(f"지갑 발굴 초기화 실패: {e}")
+
+        weekly_report = WeeklyReportEngine(
+            settings=settings,
+            telegram=telegram,
+            db=db,
+            polymarket_engine=polymarket_engine,
+            solana_engines=solana_engines,
+            wallet_discovery=wallet_discovery,
+        )
+        logger.info(
+            f"📊 주간 리포트 활성 (매주 일요일 {settings.weekly_report_hour_kst}시 KST)"
+        )
+
     trades_since_evolution = 0
     scan_count = 0
     trigger_count = 0
@@ -551,6 +578,14 @@ async def main_loop(system: dict):
                         await morning_brief.generate_and_send()
                 except Exception as e:
                     logger.warning(f"모닝 브리프 에러: {e}")
+
+                # ── 주간 리포트 (일요일 21시 KST) ────────
+                if weekly_report:
+                    try:
+                        if await weekly_report.should_run_now():
+                            await weekly_report.generate_and_send()
+                    except Exception as e:
+                        logger.warning(f"주간 리포트 에러: {e}")
 
                 # ── Polymarket 봇 (60분마다) ─────────────
                 if polymarket_engine:

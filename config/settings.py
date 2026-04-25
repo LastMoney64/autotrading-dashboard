@@ -112,6 +112,11 @@ class Settings:
     solana_default_slippage_bps: int = 300        # 3% 슬리피지
     solana_priority_fee_lamports: int = 100000    # 0.0001 SOL 우선 수수료
 
+    # ── 주간 리포트 ────────────────────────────────────
+    weekly_report_enabled: bool = True
+    weekly_report_hour_kst: int = 21              # 일요일 21시 KST
+    auto_wallet_discovery: bool = True            # 자동 지갑 발굴 활성
+
     def __post_init__(self):
         if not self.db_path:
             self.db_path = str(self.base_dir / "data" / "trading.db")
@@ -163,4 +168,8 @@ class Settings:
             solana_max_buy_sol=float(os.getenv("SOLANA_MAX_BUY_SOL", "0.05")),
             solana_default_slippage_bps=int(os.getenv("SOLANA_SLIPPAGE_BPS", "300")),
             solana_priority_fee_lamports=int(os.getenv("SOLANA_PRIORITY_FEE", "100000")),
+            # 주간 리포트
+            weekly_report_enabled=os.getenv("WEEKLY_REPORT_ENABLED", "true").lower() == "true",
+            weekly_report_hour_kst=int(os.getenv("WEEKLY_REPORT_HOUR_KST", "21")),
+            auto_wallet_discovery=os.getenv("AUTO_WALLET_DISCOVERY", "true").lower() == "true",
         )
