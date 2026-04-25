@@ -448,6 +448,19 @@ async def main_loop(system: dict):
     solana_engines = {}  # bot_name → engine
     solana_last_run: dict[str, int] = {}  # bot_name → unix ts
 
+    # ── 디버깅: 환경변수 상태 출력 ─────────────────
+    import os as _os
+    helius_raw = _os.getenv("HELIUS_API_KEY", "")
+    enabled_raw = _os.getenv("SOLANA_ENABLED", "")
+    logger.info(
+        f"🔍 솔라나 환경변수 체크:\n"
+        f"  settings.solana_enabled = {settings.solana_enabled}\n"
+        f"  settings.helius_api_key 길이 = {len(settings.helius_api_key or '')}\n"
+        f"  ENV HELIUS_API_KEY 존재 = {bool(helius_raw)} (길이 {len(helius_raw)})\n"
+        f"  ENV SOLANA_ENABLED = '{enabled_raw}'\n"
+        f"  Bot1 PK 길이 = {len(settings.solana_bot1_private_key or '')}"
+    )
+
     if settings.solana_enabled and settings.helius_api_key:
         bot_configs = [
             ("smart_money", "Bot 1 스마트머니",
