@@ -107,7 +107,40 @@ class MomentumSocialEngine:
         # 포지션 영구 저장
         self.positions_file = _persistent_dir() / "momentum_positions.json"
 
+        # Paper 가상 잔고
+        self.paper_balance_file = _persistent_dir() / "momentum_paper_balance.json"
+        self.paper_balance: Optional[float] = None
+
         self._init_db()
+
+    # ──────────────────────────────────────────────
+    # Paper 모드 가상 잔고
+    # ──────────────────────────────────────────────
+
+    def _save_paper_balance(self):
+        try:
+            self.paper_balance_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.paper_balance_file, "w") as f:
+                json.dump({"balance": self.paper_balance}, f)
+        except Exception as e:
+            logger.warning(f"Momentum paper 잔고 저장 실패: {e}")
+
+    def _load_paper_balance(self, default_sol: float):
+        try:
+            if self.paper_balance_file.exists():
+                with open(self.paper_balance_file, "r") as f:
+                    data = json.load(f)
+                self.paper_balance = float(data.get("balance", default_sol))
+                return
+        except Exception:
+            pass
+        self.paper_balance = default_sol
+        self._save_paper_balance()
+
+    async def _get_available_sol(self) -> float:
+        if self.mode == "paper":
+            return self.paper_balance if self.paper_balance is not None else 0.0
+        return await self.client.get_sol_balance()
 
     # ──────────────────────────────────────────────
     # 포지션 영구 저장
@@ -345,10 +378,18 @@ class MomentumSocialEngine:
             self.recent_attempts[mint] = int(time.time())
             return False
 
-        # 잔고
-        sol = await self.client.get_sol_balance()
+        # 잔고 (paper=가상잔고)
+        sol = await self._get_available_sol()
         if sol < self.max_buy_sol + 0.01:
-            logger.info(f"  💸 SOL 부족: {sol:.4f}")
+            logger.info(f"  💸 SOL 부족 [{self.mode}]: {sol:.4f}")
+            return False
+
+        # 가격 사전 체크
+        decimals_for_test = report["details"].get("decimals", 6)
+        test_price = await self._get_token_price_sol(mint, decimals_for_test)
+        if test_price is None or test_price <= 0:
+            logger.info(f"  🚫 ${symbol} 가격 조회 실패 — 매수 거부")
+            self.recent_attempts[mint] = int(time.time())
             return False
 
         buy_amount = self.max_buy_sol
@@ -416,6 +457,12 @@ class MomentumSocialEngine:
 
         # 영구 저장
         self._save_positions()
+
+        # Paper 가상 잔고 차감
+        if self.mode == "paper":
+            self.paper_balance -= buy_amount
+            self._save_paper_balance()
+            logger.info(f"  💰 paper 잔고: {self.paper_balance:.4f} SOL (-{buy_amount:.4f})")
 
         # DB
         try:
@@ -640,6 +687,11 @@ class MomentumSocialEngine:
         # 영구 저장
         self._save_positions()
 
+        # Paper 가상 잔고 증가
+        if self.mode == "paper" and sol_received > 0:
+            self.paper_balance += sol_received
+            self._save_paper_balance()
+
     # ──────────────────────────────────────────────
     # 초기화
     # ──────────────────────────────────────────────
@@ -648,30 +700,64 @@ class MomentumSocialEngine:
         sol = await self.client.get_sol_balance()
         s = self.client.get_status()
 
-        # 포지션 복원: JSON → DB 백업
+        # Paper 가상 잔고 로드
+        self._load_paper_balance(default_sol=sol)
+
+        # 포지션 복원
         self._load_positions()
         await self._restore_from_db()
+
+        # 가격 조회 안 되는 포지션 정리
+        invalid_mints = []
+        for mint, pos in list(self.positions.items()):
+            try:
+                price = await self._get_token_price_sol(mint, pos.get("decimals", 6))
+                if price is None or price <= 0:
+                    invalid_mints.append(mint)
+            except Exception:
+                invalid_mints.append(mint)
+
+        if invalid_mints:
+            for mint in invalid_mints:
+                pos = self.positions.pop(mint, None)
+                if pos and self.mode == "paper":
+                    self.paper_balance += pos.get("entry_sol", 0)
+                logger.info(f"  🗑️  Momentum 가격 조회 불가: ${pos.get('symbol','?')}")
+            self._save_positions()
+            self._save_paper_balance()
 
         logger.info(
             f"📈 Momentum 봇 초기화\n"
             f"  지갑: {s['address_short']}\n"
-            f"  SOL: {sol:.4f}\n"
+            f"  실제 SOL: {sol:.4f}\n"
+            f"  Paper 가상 잔고: {self.paper_balance:.4f}\n"
             f"  모드: {self.mode}\n"
-            f"  복원된 포지션: {len(self.positions)}개"
+            f"  유효 포지션: {len(self.positions)}개"
+            f"{f' (정리: {len(invalid_mints)}개)' if invalid_mints else ''}"
         )
         positions_msg = (
-            f"\n<b>복원된 포지션:</b> {len(self.positions)}개"
+            f"\n<b>유효 포지션:</b> {len(self.positions)}개"
             if self.positions else ""
+        )
+        invalid_msg = (
+            f"\n<b>제거된 포지션:</b> {len(invalid_mints)}개 (가격 조회 불가)"
+            if invalid_mints else ""
+        )
+        balance_msg = (
+            f"\n<b>Paper 가상 잔고:</b> {self.paper_balance:.4f} SOL"
+            if self.mode == "paper" else ""
         )
         try:
             await self.telegram.send(
                 f"📈 <b>Momentum + 소셜 봇 시작</b>\n\n"
                 f"<b>지갑:</b> <code>{s['address_short']}</code>\n"
-                f"<b>SOL 잔고:</b> {sol:.4f}\n"
+                f"<b>실제 SOL:</b> {sol:.4f}"
+                f"{balance_msg}\n"
                 f"<b>모드:</b> {self.mode}\n"
                 f"<b>주기:</b> {self.scan_interval//60}분마다\n"
                 f"<b>전략:</b> 거래량 + 트윗 동시 급증 토큰만"
                 f"{positions_msg}"
+                f"{invalid_msg}"
             )
         except Exception:
             pass
