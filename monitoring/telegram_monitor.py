@@ -53,12 +53,22 @@ class TelegramMonitor:
             "!resume": self._cmd_resume,
             "!help": self._cmd_help,
             "!report": self._cmd_report,
+            # 솔라나 봇 모니터링
+            "!positions": self._cmd_positions,
+            "!solana": self._cmd_positions,        # 별칭
+            "!포지션": self._cmd_positions,        # 한국어 별칭
+            "!stats": self._cmd_solana_stats,
+            "!wallets": self._cmd_wallets,
+            "!지갑": self._cmd_wallets,            # 한국어 별칭
         }
 
         # 외부 콜백
         self._on_pause: Optional[Callable] = None
         self._on_resume: Optional[Callable] = None
         self._feedback = None  # TradeFeedback 인스턴스 (외부 주입)
+        # 솔라나 봇 참조 (main.py에서 주입)
+        self.solana_engines: dict = {}
+        self.polymarket_engine = None
 
     @property
     def is_configured(self) -> bool:
@@ -355,6 +365,12 @@ class TelegramMonitor:
         """명령어 목록"""
         text = """📋 <b>사용 가능한 명령어</b>
 
+<b>━━ 솔라나 봇 ━━</b>
+<code>!positions</code> — 현재 보유 포지션 (실시간 PnL)
+<code>!stats</code> — 봇별 누적 매매 통계 (7일)
+<code>!wallets</code> — 추적 지갑 목록 + 승률
+
+<b>━━ OKX 시스템 ━━</b>
 <code>!status</code> — 시스템 상태
 <code>!agents</code> — 에이전트 목록
 <code>!performance</code> — 성과 리포트
@@ -363,9 +379,207 @@ class TelegramMonitor:
 <code>!report</code> — 트레이딩 성과 리포트
 <code>!pause</code> — 시스템 일시 중지
 <code>!resume</code> — 시스템 재개
-<code>!help</code> — 이 메시지"""
+
+한국어: <code>!포지션</code>, <code>!지갑</code>"""
 
         await self.send(text)
+
+    # ────────────────────────────────────────────
+    # 솔라나 봇 명령어
+    # ────────────────────────────────────────────
+
+    async def _cmd_positions(self, _: str):
+        """솔라나 봇 현재 보유 포지션 (실시간 PnL)"""
+        if not self.solana_engines:
+            await self.send("🟡 솔라나 봇 비활성")
+            return
+
+        bot_emoji = {
+            "smart_money": "🐋",
+            "pumpfun_sniper": "💎",
+            "momentum_social": "📈",
+        }
+        bot_name = {
+            "smart_money": "SmartMoney",
+            "pumpfun_sniper": "PumpFun",
+            "momentum_social": "Momentum",
+        }
+
+        sections = []
+        total_positions = 0
+        total_invested_sol = 0.0
+        total_current_value = 0.0
+
+        for bot_key, engine in self.solana_engines.items():
+            positions = getattr(engine, "positions", {}) or {}
+            if not positions:
+                continue
+
+            emoji = bot_emoji.get(bot_key, "🤖")
+            name = bot_name.get(bot_key, bot_key)
+            sec = [f"\n<b>{emoji} {name}</b> ({len(positions)}개)"]
+
+            for mint, pos in positions.items():
+                symbol = pos.get("symbol", "?")
+                entry_sol = pos.get("entry_sol", 0)
+                peak = pos.get("peak_pnl_pct", 0)
+
+                # 현재 가격으로 PnL 계산
+                pnl_pct = 0.0
+                current_value_sol = entry_sol  # 폴백
+                try:
+                    current_price = await engine._get_token_price_sol(
+                        mint, pos.get("decimals", 9)
+                    )
+                    entry_price = pos.get("entry_price_sol", 0)
+                    if current_price and entry_price > 0:
+                        pnl_pct = (current_price - entry_price) / entry_price * 100
+                        current_value_sol = (
+                            pos.get("token_amount_raw", 0)
+                            * current_price
+                            / (10 ** pos.get("decimals", 9))
+                        )
+                        # peak 갱신
+                        if pnl_pct > peak:
+                            peak = pnl_pct
+                except Exception:
+                    pass
+
+                pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+
+                # 단계 진행 표시
+                stages = []
+                if pos.get("stage_30_done") or (pos.get("tp_done") and pos["tp_done"][0]):
+                    stages.append("✅30%")
+                if pos.get("stage_50_done") or (pos.get("tp_done") and len(pos["tp_done"])>1 and pos["tp_done"][1]):
+                    stages.append("✅50%")
+                if pos.get("stage_100_done") or (pos.get("tp_done") and len(pos["tp_done"])>2 and pos["tp_done"][2]):
+                    stages.append("✅100%")
+                if pos.get("trailing_active"):
+                    stages.append("🎯트레일링")
+                stages_str = " ".join(stages) if stages else "—"
+
+                sec.append(
+                    f"  {pnl_emoji} <b>${symbol}</b> "
+                    f"{pnl_pct:+.1f}% (peak +{peak:.0f}%)\n"
+                    f"     진입: {entry_sol:.4f} SOL → 현재: {current_value_sol:.4f} SOL\n"
+                    f"     단계: {stages_str}\n"
+                    f"     <code>{mint[:8]}...{mint[-6:]}</code>"
+                )
+
+                total_positions += 1
+                total_invested_sol += entry_sol
+                total_current_value += current_value_sol
+
+            sections.append("\n".join(sec))
+
+        if total_positions == 0:
+            await self.send(
+                "📊 <b>현재 보유 포지션</b>\n\n"
+                "<i>보유 포지션 없음</i>"
+            )
+            return
+
+        # 총합 PnL
+        total_pnl_pct = (
+            (total_current_value - total_invested_sol) / total_invested_sol * 100
+            if total_invested_sol > 0 else 0
+        )
+        total_emoji = "🟢" if total_pnl_pct >= 0 else "🔴"
+
+        header = (
+            f"📊 <b>현재 보유 포지션</b> ({total_positions}개)\n\n"
+            f"💼 <b>총 투입:</b> {total_invested_sol:.4f} SOL\n"
+            f"💰 <b>현재 가치:</b> {total_current_value:.4f} SOL\n"
+            f"{total_emoji} <b>전체 PnL:</b> {total_pnl_pct:+.2f}%"
+        )
+
+        await self.send(header + "\n" + "\n".join(sections))
+
+    async def _cmd_solana_stats(self, _: str):
+        """솔라나 봇 누적 통계 (7일)"""
+        from datetime import timedelta
+        week_ago = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        bots = [
+            ("smart_money_trades", "🐋 SmartMoney"),
+            ("pumpfun_trades", "💎 PumpFun"),
+            ("momentum_social_trades", "📈 Momentum"),
+        ]
+
+        lines = ["📈 <b>솔라나 봇 7일 통계</b>\n"]
+
+        for table, name in bots:
+            try:
+                buys = self.db.conn.execute(
+                    f"SELECT COUNT(*) FROM {table} "
+                    f"WHERE side='BUY' AND date(timestamp) >= ?",
+                    (week_ago,),
+                ).fetchone()[0]
+                sells = self.db.conn.execute(
+                    f"SELECT COUNT(*), SUM(pnl_pct), AVG(pnl_pct), "
+                    f"SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) "
+                    f"FROM {table} WHERE side='SELL' AND date(timestamp) >= ?",
+                    (week_ago,),
+                ).fetchone()
+
+                sell_count = sells[0] or 0
+                total_pnl = sells[1] or 0
+                avg_pnl = sells[2] or 0
+                wins = sells[3] or 0
+                win_rate = (wins / sell_count * 100) if sell_count > 0 else 0
+
+                lines.append(
+                    f"<b>{name}</b>\n"
+                    f"  매수: {buys}건 / 매도: {sell_count}건\n"
+                    f"  승률: {win_rate:.0f}% ({wins}/{sell_count})\n"
+                    f"  누적 PnL: {total_pnl:+.1f}% / 평균: {avg_pnl:+.1f}%"
+                )
+            except Exception as e:
+                lines.append(f"<b>{name}</b>: 데이터 없음")
+
+        await self.send("\n\n".join(lines))
+
+    async def _cmd_wallets(self, _: str):
+        """추적 지갑 목록 + 승률"""
+        try:
+            from solana_bot.smart_money_bot.wallets import TRACKED_WALLETS
+        except Exception as e:
+            await self.send(f"⚠️ 추적 지갑 로드 실패: {e}")
+            return
+
+        if not TRACKED_WALLETS:
+            await self.send("🟡 추적 지갑 없음")
+            return
+
+        active = [w for w in TRACKED_WALLETS if w.get("active", False)]
+        inactive = [w for w in TRACKED_WALLETS if not w.get("active", False)]
+
+        # 승률 높은 순 정렬
+        active.sort(key=lambda w: w.get("win_rate", 0), reverse=True)
+
+        lines = [
+            f"🐋 <b>추적 지갑</b> (활성 {len(active)}/총 {len(TRACKED_WALLETS)})\n"
+        ]
+
+        for w in active[:20]:  # 최대 20개 표시
+            wr = w.get("win_rate", 0)
+            weight = w.get("weight", 1.0)
+            tag = w.get("tag", "")
+            addr = w.get("address", "")
+            wr_emoji = "🟢" if wr >= 0.6 else ("🟡" if wr >= 0.5 else "🔴")
+            lines.append(
+                f"{wr_emoji} <code>{addr[:8]}..{addr[-4:]}</code> "
+                f"WR:{wr:.0%} W:{weight:.2f} <i>[{tag}]</i>"
+            )
+
+        if len(active) > 20:
+            lines.append(f"\n<i>... 외 {len(active)-20}개 더</i>")
+
+        if inactive:
+            lines.append(f"\n⚫ <b>비활성:</b> {len(inactive)}개 (승률 40% 미달)")
+
+        await self.send("\n".join(lines))
 
     async def _cmd_report(self, _: str):
         """트레이딩 성과 리포트"""
