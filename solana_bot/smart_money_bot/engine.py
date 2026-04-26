@@ -299,13 +299,17 @@ class SmartMoneyEngine:
             )
             return
 
-        # 가격 사전 체크 (Jupiter에 토큰 있는지 확인 — 없으면 PnL 계산 불가)
-        decimals_for_test = report["details"].get("decimals", 9)
-        test_price = await self._get_token_price_sol(mint, decimals_for_test)
-        if test_price is None or test_price <= 0:
+        # 매수 사전 체크 (Jupiter에 매수 라우팅 있는지 — 진짜 매수 방향으로 테스트)
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        test_quote = await self.jupiter.get_quote(
+            input_mint=SOL_MINT,
+            output_mint=mint,
+            amount=int(0.005 * 1e9),  # 0.005 SOL로 테스트 (실제 매수보다 작게)
+            slippage_bps=300,
+        )
+        if not test_quote or int(test_quote.get("outAmount", 0)) <= 0:
             logger.info(
-                f"  🚫 가격 조회 실패: {mint[:10]}... "
-                f"(Jupiter에 없는 토큰 — pump.fun 본딩커브?) — 매수 거부"
+                f"  🚫 {mint[:10]}... 매수 라우팅 불가 (Jupiter) — pump.fun 본딩커브? — 매수 거부"
             )
             return
 
@@ -551,21 +555,34 @@ class SmartMoneyEngine:
             return
 
     async def _get_token_price_sol(self, mint: str, decimals: int) -> Optional[float]:
-        """1 토큰당 SOL 가격"""
-        try:
-            sample = 10 ** decimals  # 1 토큰
-            quote = await self.jupiter.get_quote(
-                input_mint=mint,
-                output_mint="So11111111111111111111111111111111111111112",
-                amount=sample,
-                slippage_bps=300,
-            )
-            if not quote:
-                return None
-            out_lamports = int(quote.get("outAmount", 0))
-            return out_lamports / 1e9
-        except Exception:
-            return None
+        """
+        1 토큰당 SOL 가격
+
+        Jupiter는 너무 작은 양(1 토큰)은 라우팅 못 찾음
+        → 큰 양으로 견적 후 단위 변환
+        → 그래도 실패하면 더 큰 양으로 재시도
+        """
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        # 시도 단위: 100 → 10K → 1M 토큰 (점점 늘려가며 라우팅 찾기)
+        for sample_tokens in [100, 10_000, 1_000_000]:
+            try:
+                sample = sample_tokens * (10 ** decimals)
+                quote = await self.jupiter.get_quote(
+                    input_mint=mint,
+                    output_mint=SOL_MINT,
+                    amount=sample,
+                    slippage_bps=300,
+                )
+                if not quote:
+                    continue
+                out_lamports = int(quote.get("outAmount", 0))
+                if out_lamports <= 0:
+                    continue
+                # 1 토큰당 SOL = 받은 SOL / 견적한 토큰 수
+                return out_lamports / 1e9 / sample_tokens
+            except Exception:
+                continue
+        return None
 
     async def _tracked_wallet_sold(
         self, mint: str, source_wallets: list[str], initial_balances: dict

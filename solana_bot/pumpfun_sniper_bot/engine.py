@@ -367,14 +367,17 @@ class PumpFunSniperEngine:
             logger.info(f"  💸 SOL 잔고 부족 [{self.mode}]: {sol_balance:.4f}")
             return False
 
-        # 가격 사전 체크 (Jupiter에 토큰 있는지)
-        # PumpFun은 졸업 전 본딩커브 토큰이라 Jupiter엔 없을 수 있지만
-        # 졸업 직전 (90%+) 토큰은 마이그레이션 직후 Jupiter에 등재되므로 확인
-        decimals_for_test = report["details"].get("decimals", 6)
-        test_price = await self._get_token_price_sol(mint, decimals_for_test)
-        if test_price is None or test_price <= 0:
+        # 매수 사전 체크 (Jupiter에 매수 라우팅 있는지)
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        test_quote = await self.jupiter.get_quote(
+            input_mint=SOL_MINT,
+            output_mint=mint,
+            amount=int(0.005 * 1e9),
+            slippage_bps=300,
+        )
+        if not test_quote or int(test_quote.get("outAmount", 0)) <= 0:
             logger.info(
-                f"  🚫 ${symbol} 가격 조회 실패 (Jupiter에 없음 — 본딩커브 미졸업) — 매수 거부"
+                f"  🚫 ${symbol} 매수 라우팅 불가 (Jupiter — 본딩커브 미졸업?) — 매수 거부"
             )
             self.recent_buys[mint] = int(time.time())
             return False
@@ -583,21 +586,26 @@ class PumpFunSniperEngine:
             return
 
     async def _get_token_price_sol(self, mint: str, decimals: int) -> Optional[float]:
-        """1 토큰당 SOL 가격"""
-        try:
-            sample = 10 ** decimals
-            quote = await self.jupiter.get_quote(
-                input_mint=mint,
-                output_mint="So11111111111111111111111111111111111111112",
-                amount=sample,
-                slippage_bps=300,
-            )
-            if not quote:
-                return None
-            out_lamports = int(quote.get("outAmount", 0))
-            return out_lamports / 1e9
-        except Exception:
-            return None
+        """1 토큰당 SOL 가격 (라우팅 가능한 양으로 견적 후 단위 변환)"""
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        for sample_tokens in [100, 10_000, 1_000_000]:
+            try:
+                sample = sample_tokens * (10 ** decimals)
+                quote = await self.jupiter.get_quote(
+                    input_mint=mint,
+                    output_mint=SOL_MINT,
+                    amount=sample,
+                    slippage_bps=300,
+                )
+                if not quote:
+                    continue
+                out_lamports = int(quote.get("outAmount", 0))
+                if out_lamports <= 0:
+                    continue
+                return out_lamports / 1e9 / sample_tokens
+            except Exception:
+                continue
+        return None
 
     async def _sell(self, mint: str, percent: int, reason: str):
         """청산"""
