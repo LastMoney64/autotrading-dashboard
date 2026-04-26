@@ -15,6 +15,9 @@ SmartMoneyEngine — Bot 1: 스마트머니 카피트레이더
 import logging
 import asyncio
 import time
+import json
+import os
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -27,6 +30,16 @@ from solana_bot.smart_money_bot.wallets import (
 
 logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
+
+
+def _persistent_dir() -> Path:
+    """영구 저장 디렉토리 (Railway Volume 우선)"""
+    # DB_PATH env 사용해서 같은 영구 디렉토리에 저장
+    db_path = os.getenv("DB_PATH", "").strip()
+    if db_path:
+        return Path(db_path).parent
+    # 폴백: 로컬 data 폴더
+    return Path(__file__).parent.parent.parent / "data"
 
 
 class SmartMoneyEngine:
@@ -76,6 +89,10 @@ class SmartMoneyEngine:
         self.trades_count = 0
         self.last_seen_signatures: dict[str, set] = {}  # wallet → 본 sig 캐시
         self.positions: dict[str, dict] = {}  # mint → 포지션 정보
+
+        # 포지션 영구 저장 (Railway Volume)
+        self.positions_file = _persistent_dir() / "smart_money_positions.json"
+
         self._init_db()
 
     def _init_db(self):
@@ -319,6 +336,9 @@ class SmartMoneyEngine:
             "tracked_balances": tracked_balances,    # {wallet: 매수 시점 잔고}
             "tracker_check_interval": 0,             # 추적자 체크 카운터 (5분마다 체크 비싸서)
         }
+
+        # 영구 저장 (재배포 시 손실 방지)
+        self._save_positions()
 
         # DB 저장
         try:
@@ -620,24 +640,128 @@ class SmartMoneyEngine:
         else:
             pos["token_amount_raw"] -= sell_raw
 
+        # 영구 저장 (포지션 변화 반영)
+        self._save_positions()
+
         self.trades_count += 1
+
+    # ──────────────────────────────────────────────
+    # 포지션 영구 저장 (Railway Volume)
+    # ──────────────────────────────────────────────
+
+    def _save_positions(self):
+        """positions를 JSON으로 저장 (재배포 시 손실 방지)"""
+        try:
+            self.positions_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.positions_file, "w", encoding="utf-8") as f:
+                json.dump(self.positions, f, ensure_ascii=False, default=str)
+        except Exception as e:
+            logger.warning(f"positions 저장 실패: {e}")
+
+    def _load_positions(self):
+        """저장된 positions 로드"""
+        try:
+            if not self.positions_file.exists():
+                return
+            with open(self.positions_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                self.positions = loaded
+                logger.info(f"  📂 포지션 {len(self.positions)}개 복원 (JSON)")
+        except Exception as e:
+            logger.warning(f"positions 로드 실패: {e}")
+
+    async def _restore_from_db(self):
+        """
+        DB에서 미청산 포지션 복원
+        SELL 기록이 없는 BUY 거래들을 positions로 복원
+        (JSON 파일 없거나 빠진 경우의 안전망)
+        """
+        try:
+            cur = self.db.conn.execute(
+                """SELECT token_mint, amount_sol, token_amount, source_wallet, timestamp, note
+                   FROM smart_money_trades
+                   WHERE side = 'BUY'
+                   AND token_mint NOT IN (
+                       SELECT DISTINCT token_mint FROM smart_money_trades
+                       WHERE side = 'SELL'
+                   )
+                   ORDER BY timestamp DESC"""
+            )
+            rows = cur.fetchall()
+            restored = 0
+            for row in rows:
+                mint = row["token_mint"]
+                if mint in self.positions:
+                    continue  # JSON에 이미 있음
+
+                # 토큰 메타 다시 조회
+                meta = await self.helius.get_token_metadata(mint)
+                if not meta:
+                    continue
+                decimals = meta.get("decimals", 9)
+                symbol = meta.get("symbol", "?")
+
+                amount_sol = float(row["amount_sol"] or 0)
+                token_amount_ui = float(row["token_amount"] or 0)
+                if amount_sol <= 0 or token_amount_ui <= 0:
+                    continue
+
+                self.positions[mint] = {
+                    "mint": mint,
+                    "symbol": symbol,
+                    "entry_sol": amount_sol,
+                    "token_amount_raw": int(token_amount_ui * (10 ** decimals)),
+                    "token_amount_ui": token_amount_ui,
+                    "decimals": decimals,
+                    "entry_price_sol": amount_sol / token_amount_ui,
+                    "entry_time": int(time.time()),  # 정확한 시점 모름 → 지금
+                    "buyers": [row["source_wallet"]] if row["source_wallet"] else [],
+                    "signal_type": "RESTORED",
+                    "stage_30_done": False,
+                    "stage_50_done": False,
+                    "stage_100_done": False,
+                    "stage_200_done": False,
+                    "peak_pnl_pct": 0,
+                    "trailing_active": False,
+                    "tracked_balances": {},  # 복원 시점에 추적 못 함
+                    "tracker_check_interval": 0,
+                }
+                restored += 1
+                logger.info(f"  ♻️  DB 복원: ${symbol} ({mint[:8]}..) {amount_sol:.4f} SOL")
+
+            if restored > 0:
+                self._save_positions()
+                logger.info(f"  ✅ DB에서 {restored}개 미청산 포지션 복원")
+        except Exception as e:
+            logger.warning(f"DB 포지션 복원 실패: {e}")
 
     # ──────────────────────────────────────────────
     # 초기화
     # ──────────────────────────────────────────────
 
     async def initialize(self):
-        """봇 시작 시 1회: 잔고 확인 + 알림"""
+        """봇 시작 시 1회: 잔고 확인 + 포지션 복원 + 알림"""
         sol_balance = await self.client.get_sol_balance()
         active = get_active_wallets()
         status = self.client.get_status()
+
+        # 포지션 복원: 1) JSON 파일 → 2) DB 백업
+        self._load_positions()
+        await self._restore_from_db()
 
         logger.info(
             f"🐋 SmartMoney 봇 초기화\n"
             f"  지갑: {status['address_short']}\n"
             f"  SOL: {sol_balance:.4f}\n"
             f"  추적 지갑: {len(active)}개\n"
-            f"  모드: {self.mode}"
+            f"  모드: {self.mode}\n"
+            f"  복원된 포지션: {len(self.positions)}개"
+        )
+
+        positions_msg = (
+            f"\n<b>복원된 포지션:</b> {len(self.positions)}개"
+            if self.positions else ""
         )
 
         try:
@@ -648,6 +772,7 @@ class SmartMoneyEngine:
                 f"<b>추적 지갑:</b> {len(active)}개\n"
                 f"<b>모드:</b> {self.mode}\n"
                 f"<b>주기:</b> {self.scan_interval//60}분마다 스캔"
+                f"{positions_msg}"
             )
         except Exception:
             pass

@@ -27,6 +27,17 @@ MomentumSocialEngine — Bot 3: 모멘텀 + 소셜 결합 트레이더
 import logging
 import asyncio
 import time
+import json
+import os
+from pathlib import Path
+
+
+def _persistent_dir() -> Path:
+    """영구 저장 디렉토리 (Railway Volume 우선)"""
+    db_path = os.getenv("DB_PATH", "").strip()
+    if db_path:
+        return Path(db_path).parent
+    return Path(__file__).parent.parent.parent / "data"
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -93,7 +104,87 @@ class MomentumSocialEngine:
         self.recent_attempts: dict[str, int] = {}  # mint → ts
         self.session_stats: dict[int, dict] = {}   # hour KST → {wins, losses}
 
+        # 포지션 영구 저장
+        self.positions_file = _persistent_dir() / "momentum_positions.json"
+
         self._init_db()
+
+    # ──────────────────────────────────────────────
+    # 포지션 영구 저장
+    # ──────────────────────────────────────────────
+
+    def _save_positions(self):
+        try:
+            self.positions_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.positions_file, "w", encoding="utf-8") as f:
+                json.dump(self.positions, f, ensure_ascii=False, default=str)
+        except Exception as e:
+            logger.warning(f"Momentum positions 저장 실패: {e}")
+
+    def _load_positions(self):
+        try:
+            if not self.positions_file.exists():
+                return
+            with open(self.positions_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                self.positions = loaded
+                logger.info(f"  📂 Momentum 포지션 {len(self.positions)}개 복원")
+        except Exception as e:
+            logger.warning(f"Momentum positions 로드 실패: {e}")
+
+    async def _restore_from_db(self):
+        """DB에서 미청산 포지션 복원"""
+        try:
+            cur = self.db.conn.execute(
+                """SELECT token_mint, symbol, amount_sol, token_amount, timestamp
+                   FROM momentum_social_trades
+                   WHERE side='BUY'
+                   AND token_mint NOT IN (
+                       SELECT DISTINCT token_mint FROM momentum_social_trades WHERE side='SELL'
+                   )
+                   ORDER BY timestamp DESC"""
+            )
+            rows = cur.fetchall()
+            from datetime import datetime as _dt
+            restored = 0
+            for row in rows:
+                mint = row["token_mint"]
+                if mint in self.positions:
+                    continue
+                meta = await self.helius.get_token_metadata(mint)
+                if not meta:
+                    continue
+                decimals = meta.get("decimals", 6)
+                amount_sol = float(row["amount_sol"] or 0)
+                token_amount_ui = float(row["token_amount"] or 0)
+                if amount_sol <= 0 or token_amount_ui <= 0:
+                    continue
+
+                self.positions[mint] = {
+                    "mint": mint,
+                    "symbol": row["symbol"] or meta.get("symbol", "?"),
+                    "entry_sol": amount_sol,
+                    "token_amount_raw": int(token_amount_ui * (10 ** decimals)),
+                    "decimals": decimals,
+                    "entry_price_sol": amount_sol / token_amount_ui,
+                    "entry_volume_24h": 0,
+                    "peak_volume_24h": 0,
+                    "entry_mentions": 0,
+                    "entry_time": int(time.time()),
+                    "entry_hour_kst": _dt.now(KST).hour,
+                    "tp_done": [False, False, False, False],
+                    "peak_pnl_pct": 0,
+                    "trailing_active": False,
+                }
+                restored += 1
+                logger.info(f"  ♻️  Momentum DB 복원: ${row['symbol']} ({mint[:8]}..)")
+
+            if restored > 0:
+                self._save_positions()
+                logger.info(f"  ✅ Momentum {restored}개 미청산 포지션 복원")
+        except Exception as e:
+            logger.warning(f"Momentum DB 복원 실패: {e}")
 
     def _init_db(self):
         try:
@@ -323,6 +414,9 @@ class MomentumSocialEngine:
         }
         self.recent_attempts[mint] = int(time.time())
 
+        # 영구 저장
+        self._save_positions()
+
         # DB
         try:
             self.db.conn.execute(
@@ -543,6 +637,9 @@ class MomentumSocialEngine:
         else:
             pos["token_amount_raw"] -= sell_raw
 
+        # 영구 저장
+        self._save_positions()
+
     # ──────────────────────────────────────────────
     # 초기화
     # ──────────────────────────────────────────────
@@ -550,11 +647,21 @@ class MomentumSocialEngine:
     async def initialize(self):
         sol = await self.client.get_sol_balance()
         s = self.client.get_status()
+
+        # 포지션 복원: JSON → DB 백업
+        self._load_positions()
+        await self._restore_from_db()
+
         logger.info(
             f"📈 Momentum 봇 초기화\n"
             f"  지갑: {s['address_short']}\n"
             f"  SOL: {sol:.4f}\n"
-            f"  모드: {self.mode}"
+            f"  모드: {self.mode}\n"
+            f"  복원된 포지션: {len(self.positions)}개"
+        )
+        positions_msg = (
+            f"\n<b>복원된 포지션:</b> {len(self.positions)}개"
+            if self.positions else ""
         )
         try:
             await self.telegram.send(
@@ -564,6 +671,7 @@ class MomentumSocialEngine:
                 f"<b>모드:</b> {self.mode}\n"
                 f"<b>주기:</b> {self.scan_interval//60}분마다\n"
                 f"<b>전략:</b> 거래량 + 트윗 동시 급증 토큰만"
+                f"{positions_msg}"
             )
         except Exception:
             pass
