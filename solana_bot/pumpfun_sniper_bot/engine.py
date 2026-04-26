@@ -367,18 +367,31 @@ class PumpFunSniperEngine:
             logger.info(f"  💸 SOL 잔고 부족 [{self.mode}]: {sol_balance:.4f}")
             return False
 
-        # 매수 사전 체크 (Jupiter에 매수 라우팅 있는지)
+        # 매수 사전 체크 — PumpFun 봇은 본딩커브 우선
+        # 1) PumpFun 본딩커브 시도 (메인)
         SOL_MINT = "So11111111111111111111111111111111111111112"
-        test_quote = await self.jupiter.get_quote(
-            input_mint=SOL_MINT,
-            output_mint=mint,
-            amount=int(0.005 * 1e9),
-            slippage_bps=300,
-        )
-        if not test_quote or int(test_quote.get("outAmount", 0)) <= 0:
-            logger.info(
-                f"  🚫 ${symbol} 매수 라우팅 불가 (Jupiter — 본딩커브 미졸업?) — 매수 거부"
+        route_via = None
+
+        # PumpFun이 import돼있어야 함
+        from solana_bot.shared import PumpFunSwap
+        if not hasattr(self, "pumpfun_swap"):
+            self.pumpfun_swap = PumpFunSwap(self.client)
+
+        if await self.pumpfun_swap.is_buyable(mint):
+            route_via = "pumpfun"
+        else:
+            # 2) 졸업 후라면 Jupiter 시도
+            test_quote = await self.jupiter.get_quote(
+                input_mint=SOL_MINT,
+                output_mint=mint,
+                amount=int(0.005 * 1e9),
+                slippage_bps=300,
             )
+            if test_quote and int(test_quote.get("outAmount", 0)) > 0:
+                route_via = "jupiter"
+
+        if not route_via:
+            logger.info(f"  🚫 ${symbol} 매수 라우팅 불가 (PumpFun + Jupiter 모두 X) — 매수 거부")
             self.recent_buys[mint] = int(time.time())
             return False
 
@@ -393,34 +406,62 @@ class PumpFunSniperEngine:
 
         signature = ""
         output_amount = 0
+        decimals = 6 if route_via == "pumpfun" else report["details"].get("decimals", 6)
 
         if self.mode == "live":
             try:
-                result = await self.jupiter.buy_token(
-                    token_mint=mint,
-                    sol_amount=buy_amount,
-                    slippage_bps=self.settings.solana_default_slippage_bps,
-                    priority_fee_lamports=self.settings.solana_priority_fee_lamports,
-                )
+                if route_via == "pumpfun":
+                    result = await self.pumpfun_swap.buy_token(
+                        token_mint=mint,
+                        sol_amount=buy_amount,
+                        slippage_bps=self.settings.solana_default_slippage_bps,
+                        priority_fee_lamports=self.settings.solana_priority_fee_lamports,
+                        mode="live",
+                    )
+                else:
+                    result = await self.jupiter.buy_token(
+                        token_mint=mint,
+                        sol_amount=buy_amount,
+                        slippage_bps=self.settings.solana_default_slippage_bps,
+                        priority_fee_lamports=self.settings.solana_priority_fee_lamports,
+                    )
                 if not result or not result.get("confirmed"):
-                    logger.warning(f"  ❌ 매수 실패")
+                    logger.warning(f"  ❌ 매수 실패 (via {route_via})")
                     self.recent_buys[mint] = int(time.time())
                     return False
                 signature = result["signature"]
                 output_amount = result["output_amount"]
-                logger.info(f"  ✅ 체결: {signature[:20]}...")
+                logger.info(f"  ✅ 체결: {signature[:20]}... (via {route_via})")
             except Exception as e:
                 logger.error(f"  ❌ 매수 에러: {e}")
                 return False
         else:
-            # paper
+            # paper — 라우터별 정확한 견적
+            if route_via == "pumpfun":
+                pf_result = await self.pumpfun_swap.buy_token(
+                    token_mint=mint,
+                    sol_amount=buy_amount,
+                    slippage_bps=self.settings.solana_default_slippage_bps,
+                    mode="paper",
+                )
+                output_amount = pf_result.get("output_amount", 0) if pf_result else 0
+            else:
+                quote = await self.jupiter.get_quote(
+                    input_mint=SOL_MINT,
+                    output_mint=mint,
+                    amount=int(buy_amount * 1e9),
+                    slippage_bps=self.settings.solana_default_slippage_bps,
+                )
+                output_amount = int(quote.get("outAmount", 0)) if quote else 0
+
+            if output_amount <= 0:
+                logger.warning(f"  ❌ paper 매수 견적 0 — 매수 취소")
+                self.recent_buys[mint] = int(time.time())
+                return False
+
             signature = "PAPER_" + str(int(time.time()))
-            decimals = report["details"].get("decimals", 6)
-            # 가상 진입가
-            output_amount = int(buy_amount * 1e9 * (10 ** decimals) / 1000)
 
         # 포지션 등록
-        decimals = report["details"].get("decimals", 6)
         token_amount_ui = output_amount / (10 ** decimals)
 
         self.positions[mint] = {
@@ -440,6 +481,7 @@ class PumpFunSniperEngine:
             "peak_pnl_pct": 0,
             "trailing_active": False,
             "price_fail_count": 0,  # 가격 조회 연속 실패 카운터
+            "route": route_via,     # pumpfun or jupiter
         }
         self.recent_buys[mint] = int(time.time())
 
@@ -515,11 +557,16 @@ class PumpFunSniperEngine:
             # 졸업 완료!
             if not pos["graduated"]:
                 pos["graduated"] = True
+                # 본딩커브 토큰 → Jupiter로 라우트 전환
+                if pos.get("route") == "pumpfun":
+                    pos["route"] = "jupiter"
+                    logger.info(f"  ♻️  ${pos['symbol']} 졸업 → Jupiter로 자동 전환")
                 logger.info(f"  🎓 ${pos['symbol']} 졸업 완료! Raydium 마이그레이션됨")
                 try:
                     await self.telegram.send(
                         f"🎓 <b>${pos['symbol']} 졸업!</b>\n\n"
                         f"Raydium DEX 마이그레이션 완료\n"
+                        f"라우트: PumpFun → Jupiter\n"
                         f"펌프 청산 시작..."
                     )
                 except Exception:
@@ -586,7 +633,21 @@ class PumpFunSniperEngine:
             return
 
     async def _get_token_price_sol(self, mint: str, decimals: int) -> Optional[float]:
-        """1 토큰당 SOL 가격 (라우팅 가능한 양으로 견적 후 단위 변환)"""
+        """가격 조회 라우터: PumpFun 본딩커브 → Jupiter 졸업 후"""
+        # PumpFun 클라이언트 lazy init
+        from solana_bot.shared import PumpFunSwap
+        if not hasattr(self, "pumpfun_swap"):
+            self.pumpfun_swap = PumpFunSwap(self.client)
+
+        # 1순위: PumpFun 본딩커브 (PumpFun 봇은 본딩커브 위주)
+        try:
+            price = await self.pumpfun_swap.get_token_price_sol(mint, decimals)
+            if price and price > 0:
+                return price
+        except Exception:
+            pass
+
+        # 2순위: Jupiter (졸업 후)
         SOL_MINT = "So11111111111111111111111111111111111111112"
         for sample_tokens in [100, 10_000, 1_000_000]:
             try:
@@ -618,18 +679,33 @@ class PumpFunSniperEngine:
             return
 
         symbol = pos.get("symbol", "?")
-        logger.info(f"  💰 [{self.mode.upper()}] SELL ${symbol} {percent}% — {reason}")
+        route = pos.get("route", "pumpfun")
+        logger.info(f"  💰 [{self.mode.upper()}] SELL ${symbol} {percent}% — {reason} (via {route})")
 
         sol_received = 0
         signature = "PAPER_SELL"
 
         if self.mode == "live":
             try:
-                result = await self.jupiter.sell_token(
-                    token_mint=mint,
-                    token_amount_raw=sell_raw,
-                    slippage_bps=self.settings.solana_default_slippage_bps,
-                )
+                # PumpFun 클라이언트 lazy init
+                from solana_bot.shared import PumpFunSwap
+                if not hasattr(self, "pumpfun_swap"):
+                    self.pumpfun_swap = PumpFunSwap(self.client)
+
+                if route == "pumpfun":
+                    result = await self.pumpfun_swap.sell_token(
+                        token_mint=mint,
+                        token_amount_raw=sell_raw,
+                        slippage_bps=self.settings.solana_default_slippage_bps,
+                        priority_fee_lamports=self.settings.solana_priority_fee_lamports,
+                        mode="live",
+                    )
+                else:
+                    result = await self.jupiter.sell_token(
+                        token_mint=mint,
+                        token_amount_raw=sell_raw,
+                        slippage_bps=self.settings.solana_default_slippage_bps,
+                    )
                 if result and result.get("confirmed"):
                     signature = result["signature"]
                     sol_received = result["output_amount_sol"]

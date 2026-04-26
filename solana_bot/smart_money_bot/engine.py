@@ -21,7 +21,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from solana_bot.shared import SolanaClient, JupiterSwap, HeliusClient, SafetyChecker
+from solana_bot.shared import SolanaClient, JupiterSwap, HeliusClient, SafetyChecker, PumpFunSwap
 from solana_bot.smart_money_bot.wallets import (
     get_active_wallets,
     update_wallet_stats,
@@ -59,6 +59,8 @@ class SmartMoneyEngine:
         self.jupiter = jupiter
         self.helius = helius
         self.safety = safety
+        # PumpFun 본딩커브 매매 (Jupiter에 없는 토큰용)
+        self.pumpfun_swap = PumpFunSwap(client)
 
         # 매매 파라미터
         self.mode = settings.solana_mode  # "paper" or "live"
@@ -299,17 +301,28 @@ class SmartMoneyEngine:
             )
             return
 
-        # 매수 사전 체크 (Jupiter에 매수 라우팅 있는지 — 진짜 매수 방향으로 테스트)
+        # 매수 사전 체크 — 라우터 (Jupiter 우선, 실패 시 PumpFun 본딩커브)
         SOL_MINT = "So11111111111111111111111111111111111111112"
+        route_via = None  # "jupiter" or "pumpfun"
+
+        # 1) Jupiter 시도
         test_quote = await self.jupiter.get_quote(
             input_mint=SOL_MINT,
             output_mint=mint,
-            amount=int(0.005 * 1e9),  # 0.005 SOL로 테스트 (실제 매수보다 작게)
+            amount=int(0.005 * 1e9),
             slippage_bps=300,
         )
-        if not test_quote or int(test_quote.get("outAmount", 0)) <= 0:
+        if test_quote and int(test_quote.get("outAmount", 0)) > 0:
+            route_via = "jupiter"
+        else:
+            # 2) PumpFun 본딩커브 시도
+            if await self.pumpfun_swap.is_buyable(mint):
+                route_via = "pumpfun"
+                logger.info(f"  🟣 {mint[:10]}... PumpFun 본딩커브 라우팅 사용")
+
+        if not route_via:
             logger.info(
-                f"  🚫 {mint[:10]}... 매수 라우팅 불가 (Jupiter) — pump.fun 본딩커브? — 매수 거부"
+                f"  🚫 {mint[:10]}... 매수 라우팅 불가 (Jupiter X, PumpFun X) — 매수 거부"
             )
             return
 
@@ -322,21 +335,31 @@ class SmartMoneyEngine:
             token_symbol = meta.get("symbol", "?")
 
         buyers_str = ", ".join(b["wallet_tag"] or b["wallet"][:6] for b in opp["buyers"][:3])
+        route_emoji = "🟢" if route_via == "jupiter" else "🟣"
         logger.info(
-            f"  🛒 [{self.mode.upper()}] BUY ${token_symbol} {buy_amount:.4f} SOL "
-            f"(by {buyers_str}, winrate {opp['avg_winrate']:.0%})"
+            f"  🛒 {route_emoji} [{self.mode.upper()}] BUY ${token_symbol} {buy_amount:.4f} SOL "
+            f"(via {route_via.upper()}, by {buyers_str}, winrate {opp['avg_winrate']:.0%})"
         )
 
         if self.mode == "live":
             try:
-                result = await self.jupiter.buy_token(
-                    token_mint=mint,
-                    sol_amount=buy_amount,
-                    slippage_bps=self.settings.solana_default_slippage_bps,
-                    priority_fee_lamports=self.settings.solana_priority_fee_lamports,
-                )
+                if route_via == "jupiter":
+                    result = await self.jupiter.buy_token(
+                        token_mint=mint,
+                        sol_amount=buy_amount,
+                        slippage_bps=self.settings.solana_default_slippage_bps,
+                        priority_fee_lamports=self.settings.solana_priority_fee_lamports,
+                    )
+                else:  # pumpfun
+                    result = await self.pumpfun_swap.buy_token(
+                        token_mint=mint,
+                        sol_amount=buy_amount,
+                        slippage_bps=self.settings.solana_default_slippage_bps,
+                        priority_fee_lamports=self.settings.solana_priority_fee_lamports,
+                        mode="live",
+                    )
                 if not result or not result.get("confirmed"):
-                    logger.warning(f"  ❌ 매수 실패")
+                    logger.warning(f"  ❌ 매수 실패 (via {route_via})")
                     return
                 signature = result["signature"]
                 output_amount = result["output_amount"]
@@ -345,12 +368,37 @@ class SmartMoneyEngine:
                 logger.error(f"  ❌ 매수 에러: {e}")
                 return
         else:
-            # paper 모드
+            # paper 모드 — 라우터별 정확한 견적 시뮬레이션
+            if route_via == "jupiter":
+                # Jupiter 견적으로 받을 토큰 양 계산 (정확)
+                quote = await self.jupiter.get_quote(
+                    input_mint=SOL_MINT,
+                    output_mint=mint,
+                    amount=int(buy_amount * 1e9),
+                    slippage_bps=self.settings.solana_default_slippage_bps,
+                )
+                output_amount = int(quote.get("outAmount", 0)) if quote else 0
+            else:  # pumpfun
+                # PumpFun 본딩커브 가상 매수 (AMM 공식)
+                pf_result = await self.pumpfun_swap.buy_token(
+                    token_mint=mint,
+                    sol_amount=buy_amount,
+                    slippage_bps=self.settings.solana_default_slippage_bps,
+                    mode="paper",
+                )
+                output_amount = pf_result.get("output_amount", 0) if pf_result else 0
+
+            if output_amount <= 0:
+                logger.warning(f"  ❌ paper 매수 견적 0 — 매수 취소")
+                return
+
             signature = "PAPER_" + str(int(time.time()))
-            output_amount = int(buy_amount * 1e9 / 0.0001)  # 가상 환산
 
         # 포지션 등록
-        decimals = report["details"].get("decimals", 9)
+        if route_via == "pumpfun":
+            decimals = 6  # Pump.fun 표준
+        else:
+            decimals = report["details"].get("decimals", 9)
         token_amount_ui = output_amount / (10 ** decimals)
 
         # 추적자들의 매수 시점 토큰 잔고 기록 (청산 카피 감지용)
@@ -389,6 +437,8 @@ class SmartMoneyEngine:
             "tracker_check_interval": 0,             # 추적자 체크 카운터 (5분마다 체크 비싸서)
             # 가격 조회 연속 실패 카운터
             "price_fail_count": 0,
+            # 매매 라우트 (jupiter or pumpfun)
+            "route": route_via,
         }
 
         # 영구 저장 (재배포 시 손실 방지)
@@ -556,14 +606,14 @@ class SmartMoneyEngine:
 
     async def _get_token_price_sol(self, mint: str, decimals: int) -> Optional[float]:
         """
-        1 토큰당 SOL 가격
+        1 토큰당 SOL 가격 — 라우터:
+        1순위: Jupiter (졸업 후 / DEX 라우팅 가능 토큰)
+        2순위: PumpFun 본딩커브 (Jupiter에 없는 본딩커브 토큰)
 
-        Jupiter는 너무 작은 양(1 토큰)은 라우팅 못 찾음
-        → 큰 양으로 견적 후 단위 변환
-        → 그래도 실패하면 더 큰 양으로 재시도
+        Jupiter는 너무 작은 양은 라우팅 X → 큰 양으로 견적 후 단위 변환.
         """
         SOL_MINT = "So11111111111111111111111111111111111111112"
-        # 시도 단위: 100 → 10K → 1M 토큰 (점점 늘려가며 라우팅 찾기)
+        # 1순위: Jupiter 시도 (100 → 10K → 1M 토큰)
         for sample_tokens in [100, 10_000, 1_000_000]:
             try:
                 sample = sample_tokens * (10 ** decimals)
@@ -578,10 +628,17 @@ class SmartMoneyEngine:
                 out_lamports = int(quote.get("outAmount", 0))
                 if out_lamports <= 0:
                     continue
-                # 1 토큰당 SOL = 받은 SOL / 견적한 토큰 수
                 return out_lamports / 1e9 / sample_tokens
             except Exception:
                 continue
+
+        # 2순위: PumpFun 본딩커브 가격
+        try:
+            price = await self.pumpfun_swap.get_token_price_sol(mint, decimals)
+            if price and price > 0:
+                return price
+        except Exception:
+            pass
         return None
 
     async def _tracked_wallet_sold(
@@ -642,7 +699,17 @@ class SmartMoneyEngine:
             return
 
         symbol = pos.get("symbol", "?")
-        logger.info(f"  💰 [{self.mode.upper()}] SELL ${symbol} {percent}% — {reason}")
+        # 매수 시 사용한 라우트 (없으면 jupiter 기본 — 호환성)
+        route = pos.get("route", "jupiter")
+        # 본딩커브 토큰이 졸업했으면 자동으로 Jupiter로 전환 시도
+        if route == "pumpfun":
+            pf_info = await self.pumpfun_swap.get_token_info(mint)
+            if pf_info and pf_info.get("complete"):
+                route = "jupiter"
+                pos["route"] = "jupiter"  # 영구 전환
+                logger.info(f"  ♻️  ${symbol} 졸업 감지 → Jupiter로 전환")
+
+        logger.info(f"  💰 [{self.mode.upper()}] SELL ${symbol} {percent}% — {reason} (via {route})")
 
         sol_received = 0
         signature = "PAPER_SELL"
@@ -650,16 +717,25 @@ class SmartMoneyEngine:
 
         if self.mode == "live":
             try:
-                result = await self.jupiter.sell_token(
-                    token_mint=mint,
-                    token_amount_raw=sell_raw,
-                    slippage_bps=self.settings.solana_default_slippage_bps,
-                )
+                if route == "jupiter":
+                    result = await self.jupiter.sell_token(
+                        token_mint=mint,
+                        token_amount_raw=sell_raw,
+                        slippage_bps=self.settings.solana_default_slippage_bps,
+                    )
+                else:  # pumpfun
+                    result = await self.pumpfun_swap.sell_token(
+                        token_mint=mint,
+                        token_amount_raw=sell_raw,
+                        slippage_bps=self.settings.solana_default_slippage_bps,
+                        priority_fee_lamports=self.settings.solana_priority_fee_lamports,
+                        mode="live",
+                    )
                 if result and result.get("confirmed"):
                     signature = result["signature"]
-                    sol_received = result["output_amount_sol"]
+                    sol_received = result.get("output_amount_sol", 0)
                 else:
-                    logger.warning("  ❌ 매도 실패")
+                    logger.warning(f"  ❌ 매도 실패 (via {route})")
                     return
             except Exception as e:
                 logger.error(f"  ❌ 매도 에러: {e}")

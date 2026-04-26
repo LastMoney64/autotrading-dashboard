@@ -4,5 +4,9 @@ from solana_bot.shared.jupiter_swap import JupiterSwap
 from solana_bot.shared.helius_client import HeliusClient
 from solana_bot.shared.safety_checker import SafetyChecker
 from solana_bot.shared.gmgn_client import GmgnClient
+from solana_bot.shared.pumpfun_swap import PumpFunSwap
 
-__all__ = ["SolanaClient", "JupiterSwap", "HeliusClient", "SafetyChecker", "GmgnClient"]
+__all__ = [
+    "SolanaClient", "JupiterSwap", "HeliusClient", "SafetyChecker",
+    "GmgnClient", "PumpFunSwap",
+]
