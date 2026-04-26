@@ -76,19 +76,28 @@ class PumpFunSniperEngine:
         self.min_unique_traders = 15 # 매수자 분산
         self.min_buy_ratio = 0.55    # 매수가 55%+ (매도 우세 X)
 
-        # 청산 파라미터
+        # 청산 파라미터 — 문샷 친화 (1000x 잡기)
         self.stop_loss_pct = -50          # -50% 손절
         self.timeout_hours = 6            # 6시간 내 졸업 못 하면 손절
-        # 다단계 익절 (조기 +30% 추가)
+
+        # 부분 청산 — 50% 회수, 50% moonbag (졸업 펌프 따라가기)
+        # PumpFun은 졸업 직전 매수 → 펌프 잡기가 핵심
         self.tp_levels = [
-            (30, 30),   # +30% → 30% 청산 (조기 익절)
-            (50, 30),   # +50% → 30% 청산
-            (100, 25),  # +100% → 25% 청산
-            (200, 100), # +200% → 나머지 전부
+            (50, 25),    # +50%  → 25% 청산
+            (200, 25),   # +200% → 25% 청산
+            (1000, 0),   # placeholder (호환성)
+            (0, 0),      # placeholder
         ]
-        # 트레일링 스탑
-        self.trailing_activate_pct = 50   # +50% 한 번 도달 시 활성화
-        self.trailing_drop_pct = 30       # peak 대비 -30% 청산
+
+        # 동적 트레일링 — peak 클수록 wider
+        self.trailing_activate_pct = 50
+        self.trailing_tiers = [
+            (200, 30),     # +50~200% → -30%
+            (1000, 45),    # +200~1000% → -45%
+            (10_000, 60),  # +1000~10000% → -60%
+            (100_000, 75), # +10000~100000% → -75%
+            (10**9, 85),   # +100000%+ → -85%
+        ]
 
         # 일일 손실 한도
         self.daily_loss_limit_pct = 50  # -50% 도달 시 매매 중지
@@ -544,6 +553,15 @@ class PumpFunSniperEngine:
             except Exception as e:
                 logger.warning(f"포지션 체크 실패 {mint[:10]}: {e}")
 
+    def _get_trailing_drop(self, peak_pnl_pct: float) -> Optional[float]:
+        """peak PnL에 따라 동적 트레일링 drop% (문샷 친화)"""
+        if peak_pnl_pct < self.trailing_activate_pct:
+            return None
+        for tier_max, drop_pct in self.trailing_tiers:
+            if peak_pnl_pct < tier_max:
+                return drop_pct
+        return self.trailing_tiers[-1][1]
+
     async def _check_position(self, mint: str):
         """단일 포지션 청산 결정"""
         pos = self.positions.get(mint)
@@ -599,32 +617,30 @@ class PumpFunSniperEngine:
             await self._sell(mint, 100, f"💸 손절 {pnl_pct:.1f}%")
             return
 
-        # 3. 트레일링 스탑 (+50% 한 번 찍은 경우만 활성)
-        if peak >= self.trailing_activate_pct:
+        # 3. 동적 트레일링 (peak 클수록 wider — 문샷 따라가기)
+        trailing_drop = self._get_trailing_drop(peak)
+        if trailing_drop is not None:
             pos["trailing_active"] = True
             drop_from_peak = peak - pnl_pct
-            if drop_from_peak >= self.trailing_drop_pct:
+            if drop_from_peak >= trailing_drop:
                 await self._sell(
                     mint, 100,
-                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%)"
+                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, drop {drop_from_peak:.0f}% ≥ 한도 {trailing_drop:.0f}%)"
                 )
                 return
 
-        # 4. 익절 단계
-        for i, (target_pct, sell_pct) in enumerate(self.tp_levels):
-            if pos["tp_done"][i]:
-                continue
-            if pnl_pct >= target_pct:
-                stage_name = ["조기익절", "1단계", "2단계", "전량익절"][i]
-                await self._sell(
-                    mint, sell_pct,
-                    f"💰 +{pnl_pct:.0f}% {stage_name} ({sell_pct}%)"
-                )
-                pos["tp_done"][i] = True
-                # 마지막 단계면 전부 청산
-                if i == len(self.tp_levels) - 1:
-                    self.positions.pop(mint, None)
-                return
+        # 4. 부분 익절 (50% 회수, 50% moonbag)
+        if pnl_pct >= 50 and not pos["tp_done"][0]:
+            await self._sell(mint, 25, f"💰 +{pnl_pct:.0f}% 1단계 (25% — 수수료+익절)")
+            pos["tp_done"][0] = True
+            return
+
+        if pnl_pct >= 200 and not pos["tp_done"][1]:
+            await self._sell(mint, 25, f"💰 +{pnl_pct:.0f}% 2단계 (25% — 원금 회수)")
+            pos["tp_done"][1] = True
+            return
+
+        # +200% 이후는 트레일링이 처리 (50% moonbag)
 
         # 5. 졸업 타임아웃
         elapsed_hours = (int(time.time()) - pos["entry_time"]) / 3600

@@ -447,17 +447,17 @@ class TelegramMonitor:
 
                 pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
 
-                # 단계 진행 표시
+                # 단계 진행 표시 (문샷 친화 — +50/+200/+500)
                 stages = []
-                if pos.get("stage_30_done") or (pos.get("tp_done") and pos["tp_done"][0]):
-                    stages.append("✅30%")
-                if pos.get("stage_50_done") or (pos.get("tp_done") and len(pos["tp_done"])>1 and pos["tp_done"][1]):
-                    stages.append("✅50%")
-                if pos.get("stage_100_done") or (pos.get("tp_done") and len(pos["tp_done"])>2 and pos["tp_done"][2]):
-                    stages.append("✅100%")
+                if pos.get("stage_50_done") or (pos.get("tp_done") and len(pos["tp_done"])>0 and pos["tp_done"][0]):
+                    stages.append("✅+50%")
+                if pos.get("stage_200_done") or (pos.get("tp_done") and len(pos["tp_done"])>1 and pos["tp_done"][1]):
+                    stages.append("✅+200%")
+                if pos.get("stage_500_done") or (pos.get("tp_done") and len(pos["tp_done"])>2 and pos["tp_done"][2]):
+                    stages.append("✅+500%")
                 if pos.get("trailing_active"):
                     stages.append("🎯트레일링")
-                stages_str = " ".join(stages) if stages else "—"
+                stages_str = " ".join(stages) if stages else "초기"
 
                 sec.append(
                     f"  {pnl_emoji} <b>${symbol}</b> "

@@ -69,19 +69,29 @@ class SmartMoneyEngine:
         self.consensus_threshold = 2  # 같은 토큰 2명 이상 매수 시 진입
         self.high_winrate_solo = 0.75  # win_rate 75%+ 단독 시그널 OK
 
-        # 청산 파라미터 — 4단계 익절 + 트레일링 스탑 + 추적자 청산 카피
+        # 청산 파라미터 — 문샷 친화적 (1000x까지 잡기)
         self.stop_loss_pct = -30                 # 손절 -30%
-        # 단계별 익절: (PnL%, 매도% of 남은 잔량)
-        # 30%→33%, 50%→33%, 100%→50%, 200%→100% (마지막은 전부)
+
+        # 부분 청산 — 42%만 회수, 58%는 moonbag (트레일링이 처리)
+        # (PnL%, 전체 포지션 대비 청산 %)
         self.take_profit_stages = [
-            (30, 33),    # +30%  → 남은 100% 중 33% 청산 (총 ~33%)
-            (50, 33),    # +50%  → 남은 67% 중 33% 청산 (총 ~55%)
-            (100, 50),   # +100% → 남은 45% 중 50% 청산 (총 ~78%)
-            (200, 100),  # +200% → 나머지 전부
+            (50, 20),    # +50%  → 20% 청산 (수수료+작은 익절)
+            (200, 20),   # +200% → 20% 청산 (원금 회수)
+            (500, 10),   # +500% → 10% 청산
+            # 그 이후엔 트레일링만 = 58% moonbag
         ]
-        # 트레일링 스탑: +30% 한 번 찍으면 활성, peak 대비 -25% 떨어지면 청산
-        self.trailing_activate_pct = 30          # +30% 한 번 도달 시 활성화
-        self.trailing_drop_pct = 25              # peak 대비 -25% 청산
+
+        # 동적 트레일링 — PnL 클수록 wider (문샷 따라가게)
+        # (peak PnL%, drop% from peak)
+        self.trailing_activate_pct = 50  # +50% 한 번 도달 시 활성화
+        self.trailing_tiers = [
+            (200, 25),     # peak +50~200% → -25% 청산 (좁게)
+            (1000, 40),    # peak +200~1000% → -40%
+            (10_000, 55),  # peak +1000~10000% → -55%
+            (100_000, 70), # peak +10000~100000% → -70%
+            (10**9, 80),   # peak +100000%+ → -80% (1000x+ 문샷)
+        ]
+
         # 추적자 청산 카피: 추적자 절반 이상이 50%+ 매도 시 우리도 청산
         self.tracker_sold_threshold_pct = 50     # 추적자 잔고 50% 미만 = 매도
         self.tracker_majority_pct = 0.5          # 추적자 50%+ 매도 시 발동
@@ -424,14 +434,16 @@ class SmartMoneyEngine:
             "entry_time": int(time.time()),
             "buyers": [b["wallet"] for b in opp["buyers"]],
             "signal_type": opp["signal_type"],
-            # 단계별 청산 추적 (4단계)
-            "stage_30_done": False,    # +30%
-            "stage_50_done": False,    # +50%
-            "stage_100_done": False,   # +100%
-            "stage_200_done": False,   # +200%
-            # 트레일링 스탑
+            # 단계별 청산 추적 (문샷 친화적: +50/+200/+500 부분 청산)
+            "stage_50_done": False,    # +50%  → 20% 청산
+            "stage_200_done": False,   # +200% → 20% 청산
+            "stage_500_done": False,   # +500% → 10% 청산
+            # 동적 트레일링 스탑 (peak PnL 따라 drop% 자동 조정)
             "peak_pnl_pct": 0,
             "trailing_active": False,
+            # 호환성 (기존 코드 참조 안 끊어지게)
+            "stage_30_done": False,
+            "stage_100_done": False,
             # 추적자 청산 감지
             "tracked_balances": tracked_balances,    # {wallet: 매수 시점 잔고}
             "tracker_check_interval": 0,             # 추적자 체크 카운터 (5분마다 체크 비싸서)
@@ -498,14 +510,26 @@ class SmartMoneyEngine:
             except Exception as e:
                 logger.warning(f"포지션 청산 체크 실패 {mint[:10]}: {e}")
 
+    def _get_trailing_drop(self, peak_pnl_pct: float) -> Optional[float]:
+        """
+        peak PnL에 따라 동적 트레일링 drop% 반환
+        peak 클수록 wider (문샷 따라가기)
+        """
+        if peak_pnl_pct < self.trailing_activate_pct:
+            return None  # 비활성
+        for tier_max, drop_pct in self.trailing_tiers:
+            if peak_pnl_pct < tier_max:
+                return drop_pct
+        return self.trailing_tiers[-1][1]  # 최고 tier
+
     async def _check_position_exit(self, mint: str):
         """
-        단일 포지션 청산 결정 — 우선순위 기반:
-        0순위: 가격 조회 연속 실패 → 강제 청산 (좀비 포지션 방지)
-        1순위: 추적자 청산 카피 (가장 강한 알파)
+        문샷 친화적 청산 — 우선순위:
+        0순위: 가격 조회 연속 실패 → 강제 청산
+        1순위: 추적자 청산 카피
         2순위: 손절 -30%
-        3순위: 트레일링 스탑 (peak 대비 -25%)
-        4순위: 단계별 익절 (+30/+50/+100/+200)
+        3순위: 동적 트레일링 (peak 따라 drop% 자동 조정)
+        4순위: 부분 청산 (+50/+200/+500) — 42%만 회수, 58%는 moonbag
         """
         pos = self.positions.get(mint)
         if not pos:
@@ -565,44 +589,42 @@ class SmartMoneyEngine:
             return
 
         # ════════════════════════════════════════════════
-        # 3순위: 트레일링 스탑 (+30% 한 번 찍은 경우만 활성)
+        # 3순위: 동적 트레일링 스탑 (PnL 클수록 wider — 문샷 따라가기)
         # ════════════════════════════════════════════════
-        if peak >= self.trailing_activate_pct:
+        trailing_drop = self._get_trailing_drop(peak)
+        if trailing_drop is not None:
             pos["trailing_active"] = True
             drop_from_peak = peak - pnl_pct
-            if drop_from_peak >= self.trailing_drop_pct:
+            if drop_from_peak >= trailing_drop:
                 await self._sell_position(
                     mint, 100,
-                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%)"
+                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, drop {drop_from_peak:.0f}% ≥ 한도 {trailing_drop:.0f}%)"
                 )
                 return
 
         # ════════════════════════════════════════════════
-        # 4순위: 단계별 익절
+        # 4순위: 부분 청산 (42% 회수, 58% moonbag)
         # ════════════════════════════════════════════════
-        # +30% → 33% 청산
-        if pnl_pct >= 30 and not pos["stage_30_done"]:
-            await self._sell_position(mint, 33, f"💰 +{pnl_pct:.0f}% 1단계 익절 (33%)")
-            pos["stage_30_done"] = True
-            return
-
-        # +50% → 추가 33% 청산
+        # +50% → 20% 청산 (수수료 + 작은 익절)
         if pnl_pct >= 50 and not pos["stage_50_done"]:
-            await self._sell_position(mint, 33, f"💰 +{pnl_pct:.0f}% 2단계 익절 (33%)")
+            await self._sell_position(mint, 20, f"💰 +{pnl_pct:.0f}% 1단계 (20% — 수수료+익절)")
             pos["stage_50_done"] = True
             return
 
-        # +100% → 추가 50% 청산
-        if pnl_pct >= 100 and not pos["stage_100_done"]:
-            await self._sell_position(mint, 50, f"💰 +{pnl_pct:.0f}% 3단계 익절 (50%)")
-            pos["stage_100_done"] = True
-            return
-
-        # +200% → 나머지 전부
+        # +200% → 20% 청산 (원금 회수)
         if pnl_pct >= 200 and not pos["stage_200_done"]:
-            await self._sell_position(mint, 100, f"🚀 +{pnl_pct:.0f}% 4단계 익절 (전량)")
+            await self._sell_position(mint, 20, f"💰 +{pnl_pct:.0f}% 2단계 (20% — 원금 회수)")
             pos["stage_200_done"] = True
             return
+
+        # +500% → 10% 청산
+        if pnl_pct >= 500 and not pos["stage_500_done"]:
+            await self._sell_position(mint, 10, f"💰 +{pnl_pct:.0f}% 3단계 (10% — 추가 회수)")
+            pos["stage_500_done"] = True
+            return
+
+        # 그 이후 (+500% 초과)는 트레일링이 처리 (58% moonbag)
+        # → 1000x 문샷도 trailing -80% 까지 follow 가능
 
     async def _get_token_price_sol(self, mint: str, decimals: int) -> Optional[float]:
         """
@@ -774,16 +796,18 @@ class SmartMoneyEngine:
         except Exception as e:
             logger.debug(f"DB 저장 실패: {e}")
 
-        # 텔레그램 — 단계 진행 표시
+        # 텔레그램 — 단계 진행 표시 (문샷 친화적)
         emoji = "💰" if won else "💸"
         peak_pct = pos.get("peak_pnl_pct", pnl_pct)
         stages_done = []
-        if pos.get("stage_30_done"): stages_done.append("✅ +30%")
-        if pos.get("stage_50_done"): stages_done.append("✅ +50%")
-        if pos.get("stage_100_done"): stages_done.append("✅ +100%")
-        if pos.get("stage_200_done"): stages_done.append("✅ +200%")
-        if pos.get("trailing_active"): stages_done.append("🎯 트레일링 ON")
-        stages_str = " ".join(stages_done) if stages_done else "—"
+        if pos.get("stage_50_done"): stages_done.append("✅+50%")
+        if pos.get("stage_200_done"): stages_done.append("✅+200%")
+        if pos.get("stage_500_done"): stages_done.append("✅+500%")
+        if pos.get("trailing_active"):
+            t_drop = self._get_trailing_drop(peak_pct)
+            if t_drop:
+                stages_done.append(f"🎯트레일링(-{t_drop:.0f}%)")
+        stages_str = " ".join(stages_done) if stages_done else "초기 단계"
 
         try:
             await self.telegram.send(

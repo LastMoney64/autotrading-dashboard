@@ -85,18 +85,26 @@ class MomentumSocialEngine:
         self.min_mention_count = 5        # 최소 트윗 멘션
         self.min_combined_score = 0.5     # 합산 점수
 
-        # 청산 — 다단계 익절 + 트레일링 스탑
+        # 청산 — 문샷 친화 (모멘텀도 1000x 잡기)
         self.stop_loss_pct = -25
+        # 부분 청산 — 45% 회수, 55% moonbag
         self.tp_levels = [
-            (30, 30),    # +30% → 30% (조기 익절)
-            (50, 30),    # +50% → 30%
-            (100, 25),   # +100% → 25%
-            (200, 100),  # +200% → 나머지 전부
+            (50, 25),    # +50% → 25% 청산
+            (200, 20),   # +200% → 20% 청산
+            (0, 0),      # placeholder
+            (0, 0),      # placeholder
         ]
         self.timeout_hours = 24  # 24시간 보유 한도
-        # 트레일링 스탑
-        self.trailing_activate_pct = 30   # +30% 한 번 도달 시 활성화
-        self.trailing_drop_pct = 20       # peak 대비 -20% 청산 (모멘텀은 빠르게)
+
+        # 동적 트레일링 (모멘텀은 빠른 보호 — drop% 살짝 좁게)
+        self.trailing_activate_pct = 30
+        self.trailing_tiers = [
+            (200, 20),     # +30~200% → -20% (모멘텀 빠른 보호)
+            (1000, 35),    # +200~1000% → -35%
+            (10_000, 50),  # +1000~10000% → -50%
+            (100_000, 65), # +10000~100000% → -65%
+            (10**9, 75),   # +100000%+ → -75%
+        ]
 
         # 상태
         self.scan_count = 0
@@ -522,6 +530,15 @@ class MomentumSocialEngine:
             except Exception as e:
                 logger.warning(f"포지션 체크 실패 {mint[:10]}: {e}")
 
+    def _get_trailing_drop(self, peak_pnl_pct: float) -> Optional[float]:
+        """peak PnL에 따라 동적 트레일링 drop% (문샷 친화)"""
+        if peak_pnl_pct < self.trailing_activate_pct:
+            return None
+        for tier_max, drop_pct in self.trailing_tiers:
+            if peak_pnl_pct < tier_max:
+                return drop_pct
+        return self.trailing_tiers[-1][1]
+
     async def _check_position(self, mint: str):
         pos = self.positions.get(mint)
         if not pos:
@@ -554,31 +571,30 @@ class MomentumSocialEngine:
             await self._sell(mint, 100, f"💸 손절 {pnl_pct:.1f}%")
             return
 
-        # 2. 트레일링 스탑 (+30% 한 번 찍은 경우만 활성)
-        if peak >= self.trailing_activate_pct:
+        # 2. 동적 트레일링 (peak 클수록 wider — 문샷 따라가기)
+        trailing_drop = self._get_trailing_drop(peak)
+        if trailing_drop is not None:
             pos["trailing_active"] = True
             drop_from_peak = peak - pnl_pct
-            if drop_from_peak >= self.trailing_drop_pct:
+            if drop_from_peak >= trailing_drop:
                 await self._sell(
                     mint, 100,
-                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%)"
+                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, drop {drop_from_peak:.0f}% ≥ 한도 {trailing_drop:.0f}%)"
                 )
                 return
 
-        # 3. 익절 단계
-        for i, (target, sell_pct) in enumerate(self.tp_levels):
-            if pos["tp_done"][i]:
-                continue
-            if pnl_pct >= target:
-                stage_name = ["조기익절", "1단계", "2단계", "전량익절"][i]
-                await self._sell(
-                    mint, sell_pct,
-                    f"💰 +{pnl_pct:.0f}% {stage_name} ({sell_pct}%)"
-                )
-                pos["tp_done"][i] = True
-                if i == len(self.tp_levels) - 1:
-                    self.positions.pop(mint, None)
-                return
+        # 3. 부분 익절 (45% 회수, 55% moonbag)
+        if pnl_pct >= 50 and not pos["tp_done"][0]:
+            await self._sell(mint, 25, f"💰 +{pnl_pct:.0f}% 1단계 (25% — 수수료+익절)")
+            pos["tp_done"][0] = True
+            return
+
+        if pnl_pct >= 200 and not pos["tp_done"][1]:
+            await self._sell(mint, 20, f"💰 +{pnl_pct:.0f}% 2단계 (20% — 원금 회수)")
+            pos["tp_done"][1] = True
+            return
+
+        # +200% 이후는 트레일링이 처리 (55% moonbag)
 
         # 4. 거래량 정점 후 50% 감소 (모멘텀 소진) — Momentum 특화 시그널
         try:
