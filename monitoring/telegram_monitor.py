@@ -59,7 +59,12 @@ class TelegramMonitor:
             "!포지션": self._cmd_positions,        # 한국어 별칭
             "!stats": self._cmd_solana_stats,
             "!wallets": self._cmd_wallets,
-            "!지갑": self._cmd_wallets,            # 한국어 별칭
+            "!지갑": self._cmd_wallets,            # 한국어 별칭 (추적 지갑)
+            # 잔고 조회 (모든 봇 지갑)
+            "!balance": self._cmd_balance,
+            "!잔고": self._cmd_balance,
+            # 데이터 리셋 (위험 — 확인 필요)
+            "!reset_solana": self._cmd_reset_solana,
         }
 
         # 외부 콜백
@@ -69,6 +74,7 @@ class TelegramMonitor:
         # 솔라나 봇 참조 (main.py에서 주입)
         self.solana_engines: dict = {}
         self.polymarket_engine = None
+        self.okx = None  # OKX 잔고 조회용
 
     @property
     def is_configured(self) -> bool:
@@ -365,6 +371,9 @@ class TelegramMonitor:
         """명령어 목록"""
         text = """📋 <b>사용 가능한 명령어</b>
 
+<b>━━ 잔고 ━━</b>
+<code>!balance</code> / <code>!잔고</code> — 모든 지갑 잔고 (Solana + Polygon + OKX)
+
 <b>━━ 솔라나 봇 ━━</b>
 <code>!positions</code> — 현재 보유 포지션 (실시간 PnL)
 <code>!stats</code> — 봇별 누적 매매 통계 (7일)
@@ -380,7 +389,10 @@ class TelegramMonitor:
 <code>!pause</code> — 시스템 일시 중지
 <code>!resume</code> — 시스템 재개
 
-한국어: <code>!포지션</code>, <code>!지갑</code>"""
+<b>━━ 위험 ━━</b>
+<code>!reset_solana</code> — 솔라나 데이터 전체 리셋 (확인 필요)
+
+한국어: <code>!포지션</code>, <code>!지갑</code>, <code>!잔고</code>"""
 
         await self.send(text)
 
@@ -539,6 +551,194 @@ class TelegramMonitor:
                 lines.append(f"<b>{name}</b>: 데이터 없음")
 
         await self.send("\n\n".join(lines))
+
+    # ────────────────────────────────────────────
+    # 잔고 조회 (모든 봇 지갑)
+    # ────────────────────────────────────────────
+
+    async def _cmd_balance(self, _: str):
+        """모든 봇의 지갑 잔고 (Solana + Polygon + OKX)"""
+        sections = []
+
+        # ── 솔라나 봇 3개 ───────────────────────
+        if self.solana_engines:
+            sections.append("🌐 <b>솔라나 봇 지갑</b>")
+            bot_emoji = {
+                "smart_money": "🐋",
+                "pumpfun_sniper": "💎",
+                "momentum_social": "📈",
+            }
+            bot_name = {
+                "smart_money": "SmartMoney",
+                "pumpfun_sniper": "PumpFun",
+                "momentum_social": "Momentum",
+            }
+            total_real = 0.0
+            total_paper = 0.0
+            for bot_key, engine in self.solana_engines.items():
+                emoji = bot_emoji.get(bot_key, "🤖")
+                name = bot_name.get(bot_key, bot_key)
+                try:
+                    real_sol = await engine.client.get_sol_balance()
+                except Exception:
+                    real_sol = 0.0
+                paper_sol = engine.paper_balance if engine.paper_balance is not None else 0.0
+                wallet = str(engine.client.public_key)
+                total_real += real_sol
+                total_paper += paper_sol
+                sections.append(
+                    f"\n{emoji} <b>{name}</b> ({engine.mode})\n"
+                    f"  주소: <code>{wallet[:8]}..{wallet[-6:]}</code>\n"
+                    f"  실제 SOL: <b>{real_sol:.4f}</b>\n"
+                    f"  Paper 가상: <b>{paper_sol:.4f} SOL</b>"
+                )
+            sections.append(
+                f"\n💰 <b>솔라나 합계</b>\n"
+                f"  실제: {total_real:.4f} SOL\n"
+                f"  Paper: {total_paper:.4f} SOL"
+            )
+
+        # ── Polymarket (Polygon) ───────────────
+        if self.polymarket_engine:
+            sections.append("\n\n🌤️ <b>Polymarket 지갑</b>")
+            try:
+                pe = self.polymarket_engine
+                eoa = getattr(pe.polygon, "wallet_address", None) or "?"
+                proxy = getattr(pe, "proxy_address", None) or getattr(pe.polygon, "proxy_address", None) or "?"
+                # POL 잔고
+                try:
+                    pol_bal = pe.polygon.get_pol_balance() if hasattr(pe.polygon, 'get_pol_balance') else 0
+                except Exception:
+                    pol_bal = 0
+                # USDC.e 잔고 (EOA + Proxy)
+                try:
+                    usdc_eoa = pe.polygon.get_usdc_balance(address=eoa) if hasattr(pe.polygon, 'get_usdc_balance') else 0
+                except Exception:
+                    usdc_eoa = 0
+                try:
+                    usdc_proxy = pe.polygon.get_usdc_balance(address=proxy) if hasattr(pe.polygon, 'get_usdc_balance') else 0
+                except Exception:
+                    usdc_proxy = 0
+                sections.append(
+                    f"  EOA: <code>{eoa[:6]}..{eoa[-4:]}</code>\n"
+                    f"  Proxy: <code>{proxy[:6] if proxy != '?' else '?'}..{proxy[-4:] if proxy != '?' else ''}</code>\n"
+                    f"  POL: <b>{pol_bal:.4f}</b>\n"
+                    f"  USDC.e (EOA): <b>${usdc_eoa:.2f}</b>\n"
+                    f"  USDC.e (Proxy): <b>${usdc_proxy:.2f}</b>"
+                )
+            except Exception as e:
+                sections.append(f"  <i>조회 실패: {e}</i>")
+
+        # ── OKX ────────────────────────────────
+        if self.okx:
+            sections.append("\n\n📊 <b>OKX 거래소</b>")
+            try:
+                bal = await self.okx.get_balance()
+                total = bal.get("total", 0)
+                free = bal.get("free", 0)
+                used = bal.get("used", 0)
+                sections.append(
+                    f"  총 자산: <b>${total:.2f}</b>\n"
+                    f"  가용: ${free:.2f}\n"
+                    f"  사용 중: ${used:.2f}\n"
+                    f"  자동매매: {'✅ 활성' if self.settings.okx_trading_enabled else '⚫ 비활성'}"
+                )
+            except Exception as e:
+                sections.append(f"  <i>조회 실패: {e}</i>")
+
+        if not sections:
+            await self.send("🟡 활성 봇 없음")
+            return
+
+        await self.send("💰 <b>전체 지갑 잔고</b>\n\n" + "\n".join(sections))
+
+    # ────────────────────────────────────────────
+    # 솔라나 데이터 전체 리셋 (위험!)
+    # ────────────────────────────────────────────
+
+    async def _cmd_reset_solana(self, text: str):
+        """솔라나 데이터 전체 리셋 (확인 필요)"""
+        parts = text.strip().split()
+        confirmed = len(parts) >= 2 and parts[1] == "CONFIRM"
+
+        if not confirmed:
+            # 첫 호출 — 경고 + 요약
+            warn_msg = [
+                "⚠️ <b>솔라나 데이터 리셋 경고</b>\n",
+                "다음이 모두 삭제됩니다:",
+                "• 모든 매매 기록 (smart_money_trades, pumpfun_trades, momentum_social_trades)",
+                "• 모든 포지션 (positions JSON × 3)",
+                "• Paper 가상 잔고 (실제 SOL 잔고로 리셋)",
+                "• 추적 지갑 win_rate/weight (주소는 유지)",
+                "",
+                "유지되는 것:",
+                "• 추적 지갑 주소 (15개 GMGN 발굴 + 시드 5개)",
+                "• 환경변수 (API 키 등)",
+                "",
+                "<b>실행하려면:</b> <code>!reset_solana CONFIRM</code>",
+            ]
+            await self.send("\n".join(warn_msg))
+            return
+
+        # 실행 — 확인됨
+        results = []
+        try:
+            # 1. 메모리 + 파일 정리 (각 봇)
+            for bot_key, engine in self.solana_engines.items():
+                try:
+                    engine.positions = {}
+                    if hasattr(engine, "_save_positions"):
+                        engine._save_positions()
+                    # paper_balance 리셋
+                    real_sol = await engine.client.get_sol_balance()
+                    engine.paper_balance = real_sol
+                    if hasattr(engine, "_save_paper_balance"):
+                        engine._save_paper_balance()
+                    results.append(f"✅ {bot_key}: positions=0, paper={real_sol:.4f} SOL")
+                except Exception as e:
+                    results.append(f"❌ {bot_key}: {e}")
+
+            # 2. DB 매매 기록 삭제
+            for table in ["smart_money_trades", "pumpfun_trades", "momentum_social_trades"]:
+                try:
+                    self.db.conn.execute(f"DELETE FROM {table}")
+                    results.append(f"✅ DB: {table} 삭제")
+                except Exception as e:
+                    results.append(f"⚠️ DB {table}: {e}")
+            self.db.conn.commit()
+
+            # 3. 추적 지갑 통계 리셋 (주소 유지, win_rate/weight 초기화)
+            try:
+                from solana_bot.smart_money_bot.wallets import TRACKED_WALLETS, save_wallets
+                reset_count = 0
+                for w in TRACKED_WALLETS:
+                    tag = w.get("tag", "")
+                    # 태그별 default win_rate
+                    if "smart_degen" in tag or "smart_money" in tag:
+                        w["win_rate"] = 0.55
+                    elif "kol" in tag:
+                        w["win_rate"] = 0.50
+                    else:
+                        w["win_rate"] = 0.50
+                    w["weight"] = 1.0
+                    w["active"] = True
+                    reset_count += 1
+                save_wallets()
+                results.append(f"✅ 추적 지갑 {reset_count}개 통계 리셋 (주소 유지)")
+            except Exception as e:
+                results.append(f"⚠️ 추적 지갑 리셋: {e}")
+
+            # 4. 알림
+            await self.send(
+                "✅ <b>솔라나 데이터 리셋 완료</b>\n\n" + "\n".join(results) +
+                "\n\n<i>새 매매부터 정확한 데이터 수집 시작</i>"
+            )
+        except Exception as e:
+            await self.send(f"❌ 리셋 중 에러: {e}")
+
+    # ────────────────────────────────────────────
+    # 추적 지갑 목록
+    # ────────────────────────────────────────────
 
     async def _cmd_wallets(self, _: str):
         """추적 지갑 목록 + 승률"""

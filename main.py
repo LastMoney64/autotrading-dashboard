@@ -544,9 +544,10 @@ async def main_loop(system: dict):
     # 모닝브리프에 봇들 연결 (모든 초기화 끝난 후)
     morning_brief.polymarket_engine = polymarket_engine
     morning_brief.solana_engines = solana_engines
-    # 텔레그램 명령어용 (!positions, !stats, !wallets)
+    # 텔레그램 명령어용 (!positions, !stats, !wallets, !balance, !reset_solana)
     telegram.solana_engines = solana_engines
     telegram.polymarket_engine = polymarket_engine
+    telegram.okx = okx
 
     # ── 주간 리포트 + 지갑 자동 발굴 초기화 ──────────
     weekly_report = None
