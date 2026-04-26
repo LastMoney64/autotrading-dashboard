@@ -74,14 +74,18 @@ class MomentumSocialEngine:
         self.min_mention_count = 5        # 최소 트윗 멘션
         self.min_combined_score = 0.5     # 합산 점수
 
-        # 청산
+        # 청산 — 다단계 익절 + 트레일링 스탑
         self.stop_loss_pct = -25
         self.tp_levels = [
-            (50, 50),    # +50% → 50%
+            (30, 30),    # +30% → 30% (조기 익절)
+            (50, 30),    # +50% → 30%
             (100, 25),   # +100% → 25%
-            (200, 25),   # +200% → 나머지
+            (200, 100),  # +200% → 나머지 전부
         ]
         self.timeout_hours = 24  # 24시간 보유 한도
+        # 트레일링 스탑
+        self.trailing_activate_pct = 30   # +30% 한 번 도달 시 활성화
+        self.trailing_drop_pct = 20       # peak 대비 -20% 청산 (모멘텀은 빠르게)
 
         # 상태
         self.scan_count = 0
@@ -312,7 +316,10 @@ class MomentumSocialEngine:
             "entry_mentions": mention.get("mention_count", 0),
             "entry_time": int(time.time()),
             "entry_hour_kst": datetime.now(KST).hour,
-            "tp_done": [False, False, False],
+            "tp_done": [False, False, False, False],  # 4단계
+            # 트레일링 스탑
+            "peak_pnl_pct": 0,
+            "trailing_active": False,
         }
         self.recent_attempts[mint] = int(time.time())
 
@@ -380,23 +387,43 @@ class MomentumSocialEngine:
 
         pnl_pct = (current_price - pos["entry_price_sol"]) / pos["entry_price_sol"] * 100
 
+        # peak 갱신 (트레일링 스탑용)
+        if pnl_pct > pos.get("peak_pnl_pct", 0):
+            pos["peak_pnl_pct"] = pnl_pct
+        peak = pos.get("peak_pnl_pct", 0)
+
         # 1. 손절
         if pnl_pct <= self.stop_loss_pct:
-            await self._sell(mint, 100, f"손절 {pnl_pct:.1f}%")
+            await self._sell(mint, 100, f"💸 손절 {pnl_pct:.1f}%")
             return
 
-        # 2. 익절 단계
+        # 2. 트레일링 스탑 (+30% 한 번 찍은 경우만 활성)
+        if peak >= self.trailing_activate_pct:
+            pos["trailing_active"] = True
+            drop_from_peak = peak - pnl_pct
+            if drop_from_peak >= self.trailing_drop_pct:
+                await self._sell(
+                    mint, 100,
+                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%)"
+                )
+                return
+
+        # 3. 익절 단계
         for i, (target, sell_pct) in enumerate(self.tp_levels):
             if pos["tp_done"][i]:
                 continue
             if pnl_pct >= target:
-                await self._sell(mint, sell_pct, f"+{pnl_pct:.0f}% 단계{i+1}")
+                stage_name = ["조기익절", "1단계", "2단계", "전량익절"][i]
+                await self._sell(
+                    mint, sell_pct,
+                    f"💰 +{pnl_pct:.0f}% {stage_name} ({sell_pct}%)"
+                )
                 pos["tp_done"][i] = True
                 if i == len(self.tp_levels) - 1:
                     self.positions.pop(mint, None)
                 return
 
-        # 3. 거래량 정점 후 50% 감소 (모멘텀 소진)
+        # 4. 거래량 정점 후 50% 감소 (모멘텀 소진) — Momentum 특화 시그널
         try:
             current_data = await self.dex_scanner.search_solana(pos.get("symbol", ""))
             for t in current_data:
@@ -405,16 +432,19 @@ class MomentumSocialEngine:
                     if cur_vol > pos["peak_volume_24h"]:
                         pos["peak_volume_24h"] = cur_vol
                     elif pos["peak_volume_24h"] > 0 and cur_vol < pos["peak_volume_24h"] * 0.5:
-                        await self._sell(mint, 100, f"거래량 50% 하락 (모멘텀 소진) {pnl_pct:+.1f}%")
+                        await self._sell(
+                            mint, 100,
+                            f"📉 거래량 50% 하락 (모멘텀 소진) {pnl_pct:+.1f}%"
+                        )
                         return
                     break
         except Exception:
             pass
 
-        # 4. 24시간 타임아웃
+        # 5. 24시간 타임아웃
         elapsed_h = (int(time.time()) - pos["entry_time"]) / 3600
         if elapsed_h >= self.timeout_hours:
-            await self._sell(mint, 100, f"타임아웃 {elapsed_h:.1f}h ({pnl_pct:+.1f}%)")
+            await self._sell(mint, 100, f"⏰ 타임아웃 {elapsed_h:.1f}h ({pnl_pct:+.1f}%)")
 
     async def _get_token_price_sol(self, mint: str, decimals: int) -> Optional[float]:
         try:

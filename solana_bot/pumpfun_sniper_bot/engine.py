@@ -68,11 +68,16 @@ class PumpFunSniperEngine:
         # 청산 파라미터
         self.stop_loss_pct = -50          # -50% 손절
         self.timeout_hours = 6            # 6시간 내 졸업 못 하면 손절
+        # 다단계 익절 (조기 +30% 추가)
         self.tp_levels = [
-            (50, 50),   # +50% → 50% 청산
+            (30, 30),   # +30% → 30% 청산 (조기 익절)
+            (50, 30),   # +50% → 30% 청산
             (100, 25),  # +100% → 25% 청산
-            (200, 25),  # +200% → 나머지 청산
+            (200, 100), # +200% → 나머지 전부
         ]
+        # 트레일링 스탑
+        self.trailing_activate_pct = 50   # +50% 한 번 도달 시 활성화
+        self.trailing_drop_pct = 30       # peak 대비 -30% 청산
 
         # 일일 손실 한도
         self.daily_loss_limit_pct = 50  # -50% 도달 시 매매 중지
@@ -291,8 +296,11 @@ class PumpFunSniperEngine:
             "entry_price_sol": buy_amount / token_amount_ui if token_amount_ui > 0 else 0,
             "entry_progress_pct": progress,
             "entry_time": int(time.time()),
-            "tp_done": [False, False, False],
+            "tp_done": [False, False, False, False],  # 4단계로 변경
             "graduated": False,
+            # 트레일링 스탑
+            "peak_pnl_pct": 0,
+            "trailing_active": False,
         }
         self.recent_buys[mint] = int(time.time())
 
@@ -376,27 +384,47 @@ class PumpFunSniperEngine:
 
         pnl_pct = (current_price - pos["entry_price_sol"]) / pos["entry_price_sol"] * 100
 
+        # peak 갱신 (트레일링 스탑용)
+        if pnl_pct > pos.get("peak_pnl_pct", 0):
+            pos["peak_pnl_pct"] = pnl_pct
+        peak = pos.get("peak_pnl_pct", 0)
+
         # 2. 손절
         if pnl_pct <= self.stop_loss_pct:
-            await self._sell(mint, 100, f"손절 {pnl_pct:.1f}%")
+            await self._sell(mint, 100, f"💸 손절 {pnl_pct:.1f}%")
             return
 
-        # 3. 익절 단계
+        # 3. 트레일링 스탑 (+50% 한 번 찍은 경우만 활성)
+        if peak >= self.trailing_activate_pct:
+            pos["trailing_active"] = True
+            drop_from_peak = peak - pnl_pct
+            if drop_from_peak >= self.trailing_drop_pct:
+                await self._sell(
+                    mint, 100,
+                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%)"
+                )
+                return
+
+        # 4. 익절 단계
         for i, (target_pct, sell_pct) in enumerate(self.tp_levels):
             if pos["tp_done"][i]:
                 continue
             if pnl_pct >= target_pct:
-                await self._sell(mint, sell_pct, f"+{pnl_pct:.0f}% 단계 {i+1} 청산")
+                stage_name = ["조기익절", "1단계", "2단계", "전량익절"][i]
+                await self._sell(
+                    mint, sell_pct,
+                    f"💰 +{pnl_pct:.0f}% {stage_name} ({sell_pct}%)"
+                )
                 pos["tp_done"][i] = True
                 # 마지막 단계면 전부 청산
                 if i == len(self.tp_levels) - 1:
                     self.positions.pop(mint, None)
                 return
 
-        # 4. 졸업 타임아웃
+        # 5. 졸업 타임아웃
         elapsed_hours = (int(time.time()) - pos["entry_time"]) / 3600
         if elapsed_hours >= self.timeout_hours and not pos["graduated"]:
-            await self._sell(mint, 100, f"졸업 실패 타임아웃 ({elapsed_hours:.1f}h)")
+            await self._sell(mint, 100, f"⏰ 졸업 실패 타임아웃 ({elapsed_hours:.1f}h)")
             return
 
     async def _get_token_price_sol(self, mint: str, decimals: int) -> Optional[float]:

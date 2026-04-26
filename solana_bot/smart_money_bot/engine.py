@@ -54,12 +54,22 @@ class SmartMoneyEngine:
         self.consensus_threshold = 2  # 같은 토큰 2명 이상 매수 시 진입
         self.high_winrate_solo = 0.75  # win_rate 75%+ 단독 시그널 OK
 
-        # 청산 파라미터
-        self.stop_loss_pct = -30
-        self.take_profit_levels = [
-            (100, 50),   # +100% → 50% 청산
-            (200, 25),   # +200% → 추가 25% 청산
+        # 청산 파라미터 — 4단계 익절 + 트레일링 스탑 + 추적자 청산 카피
+        self.stop_loss_pct = -30                 # 손절 -30%
+        # 단계별 익절: (PnL%, 매도% of 남은 잔량)
+        # 30%→33%, 50%→33%, 100%→50%, 200%→100% (마지막은 전부)
+        self.take_profit_stages = [
+            (30, 33),    # +30%  → 남은 100% 중 33% 청산 (총 ~33%)
+            (50, 33),    # +50%  → 남은 67% 중 33% 청산 (총 ~55%)
+            (100, 50),   # +100% → 남은 45% 중 50% 청산 (총 ~78%)
+            (200, 100),  # +200% → 나머지 전부
         ]
+        # 트레일링 스탑: +30% 한 번 찍으면 활성, peak 대비 -25% 떨어지면 청산
+        self.trailing_activate_pct = 30          # +30% 한 번 도달 시 활성화
+        self.trailing_drop_pct = 25              # peak 대비 -25% 청산
+        # 추적자 청산 카피: 추적자 절반 이상이 50%+ 매도 시 우리도 청산
+        self.tracker_sold_threshold_pct = 50     # 추적자 잔고 50% 미만 = 매도
+        self.tracker_majority_pct = 0.5          # 추적자 50%+ 매도 시 발동
 
         # 상태
         self.scan_count = 0
@@ -274,6 +284,18 @@ class SmartMoneyEngine:
         decimals = report["details"].get("decimals", 9)
         token_amount_ui = output_amount / (10 ** decimals)
 
+        # 추적자들의 매수 시점 토큰 잔고 기록 (청산 카피 감지용)
+        tracked_balances = {}
+        for b in opp["buyers"]:
+            wallet_addr = b["wallet"]
+            try:
+                bal = await self.helius.get_wallet_token_balance(wallet_addr, mint)
+                if bal is not None:
+                    tracked_balances[wallet_addr] = bal
+                    logger.debug(f"  추적자 {wallet_addr[:8]} 잔고: {bal}")
+            except Exception:
+                pass
+
         self.positions[mint] = {
             "mint": mint,
             "symbol": token_symbol,
@@ -285,8 +307,17 @@ class SmartMoneyEngine:
             "entry_time": int(time.time()),
             "buyers": [b["wallet"] for b in opp["buyers"]],
             "signal_type": opp["signal_type"],
-            "partial_50_done": False,
-            "partial_25_done": False,
+            # 단계별 청산 추적 (4단계)
+            "stage_30_done": False,    # +30%
+            "stage_50_done": False,    # +50%
+            "stage_100_done": False,   # +100%
+            "stage_200_done": False,   # +200%
+            # 트레일링 스탑
+            "peak_pnl_pct": 0,
+            "trailing_active": False,
+            # 추적자 청산 감지
+            "tracked_balances": tracked_balances,    # {wallet: 매수 시점 잔고}
+            "tracker_check_interval": 0,             # 추적자 체크 카운터 (5분마다 체크 비싸서)
         }
 
         # DB 저장
@@ -338,12 +369,18 @@ class SmartMoneyEngine:
                 logger.warning(f"포지션 청산 체크 실패 {mint[:10]}: {e}")
 
     async def _check_position_exit(self, mint: str):
-        """단일 포지션 청산 결정"""
+        """
+        단일 포지션 청산 결정 — 우선순위 기반:
+        1순위: 추적자 청산 카피 (가장 강한 알파)
+        2순위: 손절 -30%
+        3순위: 트레일링 스탑 (peak 대비 -25%)
+        4순위: 단계별 익절 (+30/+50/+100/+200)
+        """
         pos = self.positions.get(mint)
         if not pos:
             return
 
-        # 현재 가격 조회 (1 토큰 → ? SOL)
+        # 현재 가격 조회
         current_price = await self._get_token_price_sol(mint, pos["decimals"])
         if not current_price:
             return
@@ -354,31 +391,78 @@ class SmartMoneyEngine:
 
         pnl_pct = (current_price - entry_price) / entry_price * 100
 
-        # 1. 손절 -30%
+        # peak 갱신
+        if pnl_pct > pos["peak_pnl_pct"]:
+            pos["peak_pnl_pct"] = pnl_pct
+        peak = pos["peak_pnl_pct"]
+
+        # ════════════════════════════════════════════════
+        # 1순위: 추적자 청산 카피 (가장 강한 시그널)
+        # ════════════════════════════════════════════════
+        # 매 사이클 호출하면 API 부담 → 5번에 1번만 (5분 × 5 = 25분마다)
+        pos["tracker_check_interval"] += 1
+        if pos["tracker_check_interval"] >= 5:
+            pos["tracker_check_interval"] = 0
+            sold_info = await self._tracked_wallet_sold(
+                mint, pos["buyers"], pos.get("tracked_balances", {})
+            )
+            if sold_info["sold"]:
+                await self._sell_position(
+                    mint, 100,
+                    f"🐋 추적자 청산 카피 ({sold_info['detail']}) PnL {pnl_pct:+.1f}%"
+                )
+                return
+
+        # ════════════════════════════════════════════════
+        # 2순위: 손절 -30%
+        # ════════════════════════════════════════════════
         if pnl_pct <= self.stop_loss_pct:
-            await self._sell_position(mint, 100, f"손절 {pnl_pct:.1f}%")
+            await self._sell_position(mint, 100, f"💸 손절 {pnl_pct:.1f}%")
             return
 
-        # 2. 익절 단계
-        if pnl_pct >= 100 and not pos["partial_50_done"]:
-            await self._sell_position(mint, 50, f"+{pnl_pct:.0f}% 50% 청산")
-            pos["partial_50_done"] = True
+        # ════════════════════════════════════════════════
+        # 3순위: 트레일링 스탑 (+30% 한 번 찍은 경우만 활성)
+        # ════════════════════════════════════════════════
+        if peak >= self.trailing_activate_pct:
+            pos["trailing_active"] = True
+            drop_from_peak = peak - pnl_pct
+            if drop_from_peak >= self.trailing_drop_pct:
+                await self._sell_position(
+                    mint, 100,
+                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%)"
+                )
+                return
+
+        # ════════════════════════════════════════════════
+        # 4순위: 단계별 익절
+        # ════════════════════════════════════════════════
+        # +30% → 33% 청산
+        if pnl_pct >= 30 and not pos["stage_30_done"]:
+            await self._sell_position(mint, 33, f"💰 +{pnl_pct:.0f}% 1단계 익절 (33%)")
+            pos["stage_30_done"] = True
             return
 
-        if pnl_pct >= 200 and not pos["partial_25_done"]:
-            await self._sell_position(mint, 50, f"+{pnl_pct:.0f}% 추가 청산")  # 남은 50% 중 50%
-            pos["partial_25_done"] = True
+        # +50% → 추가 33% 청산
+        if pnl_pct >= 50 and not pos["stage_50_done"]:
+            await self._sell_position(mint, 33, f"💰 +{pnl_pct:.0f}% 2단계 익절 (33%)")
+            pos["stage_50_done"] = True
             return
 
-        # 3. 추적 지갑이 청산했으면 우리도
-        if await self._tracked_wallet_sold(mint, pos["buyers"]):
-            await self._sell_position(mint, 100, f"추적자 청산 → 카피 ({pnl_pct:.1f}%)")
+        # +100% → 추가 50% 청산
+        if pnl_pct >= 100 and not pos["stage_100_done"]:
+            await self._sell_position(mint, 50, f"💰 +{pnl_pct:.0f}% 3단계 익절 (50%)")
+            pos["stage_100_done"] = True
+            return
+
+        # +200% → 나머지 전부
+        if pnl_pct >= 200 and not pos["stage_200_done"]:
+            await self._sell_position(mint, 100, f"🚀 +{pnl_pct:.0f}% 4단계 익절 (전량)")
+            pos["stage_200_done"] = True
             return
 
     async def _get_token_price_sol(self, mint: str, decimals: int) -> Optional[float]:
         """1 토큰당 SOL 가격"""
         try:
-            # 작은 양으로 견적 (가격 영향 최소)
             sample = 10 ** decimals  # 1 토큰
             quote = await self.jupiter.get_quote(
                 input_mint=mint,
@@ -393,11 +477,52 @@ class SmartMoneyEngine:
         except Exception:
             return None
 
-    async def _tracked_wallet_sold(self, mint: str, source_wallets: list[str]) -> bool:
-        """추적 지갑이 이 토큰을 청산했는지 체크"""
-        # Helius로 매도 이벤트 감지 (간단 구현: 잔고 비교)
-        # 정확한 구현은 추후 확장
-        return False  # placeholder
+    async def _tracked_wallet_sold(
+        self, mint: str, source_wallets: list[str], initial_balances: dict
+    ) -> dict:
+        """
+        추적 지갑이 이 토큰을 청산했는지 체크 (Helius 잔고 조회)
+
+        절반 이상의 추적자가 50%+ 매도 시 → 우리도 청산
+
+        Returns: {
+            "sold": bool,
+            "detail": str  # "2/3 매도" 형태
+        }
+        """
+        if not source_wallets or not initial_balances:
+            return {"sold": False, "detail": ""}
+
+        sold_count = 0
+        sold_wallets = []
+        checked = 0
+
+        for wallet in source_wallets:
+            initial = initial_balances.get(wallet, 0)
+            if initial <= 0:
+                continue
+            checked += 1
+            current = await self.helius.get_wallet_token_balance(wallet, mint)
+            if current is None:
+                continue
+            # 매수 시점 대비 50% 미만 보유 = "매도했다"
+            if current < initial * (self.tracker_sold_threshold_pct / 100):
+                sold_count += 1
+                sold_wallets.append(wallet[:8])
+            await asyncio.sleep(0.3)  # API rate limit 보호
+
+        if checked == 0:
+            return {"sold": False, "detail": ""}
+
+        # 절반 이상 매도 시 발동
+        threshold = max(1, int(checked * self.tracker_majority_pct))
+        sold = sold_count >= threshold
+
+        return {
+            "sold": sold,
+            "detail": f"{sold_count}/{checked} 매도 ({', '.join(sold_wallets[:2])})"
+                      if sold else f"{sold_count}/{checked} 매도",
+        }
 
     async def _sell_position(self, mint: str, percent: int, reason: str):
         """포지션 일부 또는 전부 청산"""
@@ -466,15 +591,25 @@ class SmartMoneyEngine:
         except Exception as e:
             logger.debug(f"DB 저장 실패: {e}")
 
-        # 텔레그램
+        # 텔레그램 — 단계 진행 표시
         emoji = "💰" if won else "💸"
+        peak_pct = pos.get("peak_pnl_pct", pnl_pct)
+        stages_done = []
+        if pos.get("stage_30_done"): stages_done.append("✅ +30%")
+        if pos.get("stage_50_done"): stages_done.append("✅ +50%")
+        if pos.get("stage_100_done"): stages_done.append("✅ +100%")
+        if pos.get("stage_200_done"): stages_done.append("✅ +200%")
+        if pos.get("trailing_active"): stages_done.append("🎯 트레일링 ON")
+        stages_str = " ".join(stages_done) if stages_done else "—"
+
         try:
             await self.telegram.send(
                 f"{emoji} <b>SmartMoney {self.mode.upper()}: SELL {percent}%</b>\n\n"
                 f"<b>토큰:</b> ${symbol}\n"
                 f"<b>사유:</b> {reason}\n"
                 f"<b>받음:</b> {sol_received:.4f} SOL\n"
-                f"<b>PnL:</b> {pnl_pct:+.2f}%"
+                f"<b>PnL:</b> {pnl_pct:+.2f}% (peak +{peak_pct:.0f}%)\n"
+                f"<b>진행:</b> {stages_str}"
             )
         except Exception:
             pass

@@ -134,6 +134,52 @@ class HeliusClient:
     # 토큰 홀더 분석
     # ──────────────────────────────────────────────
 
+    async def get_wallet_token_balance(self, wallet: str, mint: str) -> Optional[float]:
+        """
+        지갑의 특정 토큰 보유량 (UI 단위)
+
+        getTokenAccountsByOwner로 해당 지갑의 모든 토큰 계정 조회 후
+        해당 mint의 잔고 합산.
+
+        Returns: float (UI 단위) 또는 None (조회 실패)
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.rpc_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTokenAccountsByOwner",
+                        "params": [
+                            wallet,
+                            {"mint": mint},
+                            {"encoding": "jsonParsed"},
+                        ],
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+                    accounts = data.get("result", {}).get("value", []) or []
+                    total_ui = 0.0
+                    for acc in accounts:
+                        info = (
+                            acc.get("account", {})
+                            .get("data", {})
+                            .get("parsed", {})
+                            .get("info", {})
+                        )
+                        token_amount = info.get("tokenAmount", {})
+                        ui_amt = token_amount.get("uiAmount")
+                        if ui_amt is not None:
+                            total_ui += float(ui_amt)
+                    return total_ui
+        except Exception as e:
+            logger.debug(f"지갑 토큰 잔고 실패 {wallet[:8]}/{mint[:8]}: {e}")
+            return None
+
     async def get_token_largest_accounts(self, mint: str) -> list[dict]:
         """상위 홀더 20명"""
         try:
