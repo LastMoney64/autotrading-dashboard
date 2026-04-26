@@ -386,7 +386,7 @@ class WalletDiscovery:
             "new_wallets": [...]
         }
         """
-        from solana_bot.smart_money_bot.wallets import TRACKED_WALLETS
+        from solana_bot.smart_money_bot.wallets import TRACKED_WALLETS, add_wallet, save_wallets
 
         existing_addrs = {w["address"] for w in TRACKED_WALLETS}
         new_wallets_added: list[dict] = []
@@ -416,7 +416,8 @@ class WalletDiscovery:
                     "weight": 1.0,
                     "active": True,
                 }
-                TRACKED_WALLETS.append(new_wallet)
+                if not add_wallet(new_wallet, save=False):
+                    continue  # 중복
                 existing_addrs.add(w["address"])
                 new_wallets_added.append({
                     "address": w["address"],
@@ -513,12 +514,18 @@ class WalletDiscovery:
                 "weight": 1.0,
                 "active": True,
             }
-            TRACKED_WALLETS.append(new_wallet)
+            if not add_wallet(new_wallet, save=False):
+                continue  # 중복
             existing_addrs.add(stats["address"])
             new_wallets_added.append({
                 "address": stats["address"],
                 "stats": stats,
             })
+
+        # 발굴 결과 영구 저장 (재배포 시 보존)
+        if new_wallets_added:
+            save_wallets()
+            logger.info(f"  💾 추적 지갑 영구 저장 완료 ({len(TRACKED_WALLETS)}개)")
 
         return {
             "gmgn_added": gmgn_added,

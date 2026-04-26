@@ -3,11 +3,29 @@
 
 GMGN.AI에서 수익률 Top 검증된 지갑들.
 사용자가 추가/제거 가능.
+
+영구 저장: Railway Volume의 wallets.json에 저장됨.
+재배포 시 자동 복원 (자동 발굴 + 자기학습 결과 보존).
 """
 
-# 검증된 솔라나 스마트머니 지갑 (공개 데이터 기반)
-# 출처: GMGN.AI Top Traders, Cielo Finance leaderboard, Twitter alpha groups
-TRACKED_WALLETS = [
+import json
+import os
+import logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+def _wallets_file() -> Path:
+    """추적 지갑 영구 저장 파일 경로 (Railway Volume)"""
+    db_path = os.getenv("DB_PATH", "").strip()
+    if db_path:
+        return Path(db_path).parent / "tracked_wallets.json"
+    return Path(__file__).parent.parent.parent / "data" / "tracked_wallets.json"
+
+
+# 시드 지갑 (초기 배포 시 사용 — JSON 파일 없을 때)
+_SEED_WALLETS = [
     # ── Top 수익률 지갑 (참고용 시작 리스트) ──
     # win_rate, avg_pnl_30d, tag 등은 추후 자기학습으로 자동 업데이트
     {
@@ -45,15 +63,40 @@ TRACKED_WALLETS = [
         "weight": 0.9,
         "active": True,
     },
-    # 사용자 추가 지갑은 여기 추가
-    # {
-    #     "address": "...",
-    #     "tag": "custom_alpha",
-    #     "win_rate": 0.50,
-    #     "weight": 1.0,
-    #     "active": True,
-    # },
 ]
+
+
+def _load_wallets() -> list[dict]:
+    """JSON에서 추적 지갑 로드 — 없으면 시드 사용"""
+    path = _wallets_file()
+    try:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                wallets = json.load(f)
+            if isinstance(wallets, list) and wallets:
+                logger.info(f"📂 추적 지갑 {len(wallets)}개 복원 (JSON: {path})")
+                return wallets
+    except Exception as e:
+        logger.warning(f"추적 지갑 로드 실패: {e}")
+
+    # 시드로 초기화
+    logger.info(f"🌱 추적 지갑 시드 {len(_SEED_WALLETS)}개로 초기화")
+    return [dict(w) for w in _SEED_WALLETS]  # 깊은 복사
+
+
+def save_wallets():
+    """추적 지갑을 JSON으로 저장 (자동 발굴/자기학습 결과 보존)"""
+    path = _wallets_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(TRACKED_WALLETS, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"추적 지갑 저장 실패: {e}")
+
+
+# 모듈 로드 시점에 JSON에서 자동 로드 (재배포 시 보존)
+TRACKED_WALLETS = _load_wallets()
 
 
 def get_active_wallets() -> list[dict]:
@@ -61,7 +104,22 @@ def get_active_wallets() -> list[dict]:
     return [w for w in TRACKED_WALLETS if w.get("active", False)]
 
 
-def update_wallet_stats(address: str, won: bool):
+def add_wallet(wallet_dict: dict, save: bool = True) -> bool:
+    """추적 지갑 추가 (중복 체크 + 자동 영구 저장)"""
+    addr = wallet_dict.get("address", "")
+    if not addr:
+        return False
+    # 중복 체크
+    for w in TRACKED_WALLETS:
+        if w["address"] == addr:
+            return False
+    TRACKED_WALLETS.append(wallet_dict)
+    if save:
+        save_wallets()
+    return True
+
+
+def update_wallet_stats(address: str, won: bool, save: bool = True):
     """매매 결과로 지갑 통계 자동 업데이트 (자기학습)
 
     이긴 매매: weight ↑, win_rate ↑
@@ -84,5 +142,8 @@ def update_wallet_stats(address: str, won: bool):
             if new_wr < 0.40:
                 w["active"] = False
 
+            # 자동 영구 저장 (재배포 시 학습 결과 보존)
+            if save:
+                save_wallets()
             return True
     return False

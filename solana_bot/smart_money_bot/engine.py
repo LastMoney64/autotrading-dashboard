@@ -383,6 +383,8 @@ class SmartMoneyEngine:
             # 추적자 청산 감지
             "tracked_balances": tracked_balances,    # {wallet: 매수 시점 잔고}
             "tracker_check_interval": 0,             # 추적자 체크 카운터 (5분마다 체크 비싸서)
+            # 가격 조회 연속 실패 카운터
+            "price_fail_count": 0,
         }
 
         # 영구 저장 (재배포 시 손실 방지)
@@ -445,6 +447,7 @@ class SmartMoneyEngine:
     async def _check_position_exit(self, mint: str):
         """
         단일 포지션 청산 결정 — 우선순위 기반:
+        0순위: 가격 조회 연속 실패 → 강제 청산 (좀비 포지션 방지)
         1순위: 추적자 청산 카피 (가장 강한 알파)
         2순위: 손절 -30%
         3순위: 트레일링 스탑 (peak 대비 -25%)
@@ -457,7 +460,20 @@ class SmartMoneyEngine:
         # 현재 가격 조회
         current_price = await self._get_token_price_sol(mint, pos["decimals"])
         if not current_price:
+            # 가격 조회 실패 카운터 증가
+            pos["price_fail_count"] = pos.get("price_fail_count", 0) + 1
+            # 5번 연속 실패 (5사이클 = 25분) → 강제 청산
+            if pos["price_fail_count"] >= 5:
+                logger.warning(
+                    f"  ⚠️  ${pos.get('symbol','?')} 가격 조회 5회 연속 실패 → 강제 청산"
+                )
+                await self._sell_position(
+                    mint, 100,
+                    f"⚠️ 좀비 포지션 강제 청산 (가격 조회 불가)"
+                )
             return
+        # 가격 조회 성공 → 카운터 리셋
+        pos["price_fail_count"] = 0
 
         entry_price = pos["entry_price_sol"]
         if entry_price <= 0:
@@ -767,6 +783,19 @@ class SmartMoneyEngine:
                 if amount_sol <= 0 or token_amount_ui <= 0:
                     continue
 
+                # 복원 시점에 추적자들의 현재 잔고 조회 (청산 카피 작동을 위해)
+                # 매수 시점은 모르지만 "지금" 잔고 = "유지 중인 잔고" 가정
+                buyers = [row["source_wallet"]] if row["source_wallet"] else []
+                tracked_balances = {}
+                for wallet_addr in buyers:
+                    try:
+                        bal = await self.helius.get_wallet_token_balance(wallet_addr, mint)
+                        if bal is not None and bal > 0:
+                            tracked_balances[wallet_addr] = bal
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.2)  # rate limit 보호
+
                 self.positions[mint] = {
                     "mint": mint,
                     "symbol": symbol,
@@ -776,7 +805,7 @@ class SmartMoneyEngine:
                     "decimals": decimals,
                     "entry_price_sol": amount_sol / token_amount_ui,
                     "entry_time": int(time.time()),  # 정확한 시점 모름 → 지금
-                    "buyers": [row["source_wallet"]] if row["source_wallet"] else [],
+                    "buyers": buyers,
                     "signal_type": "RESTORED",
                     "stage_30_done": False,
                     "stage_50_done": False,
@@ -784,11 +813,16 @@ class SmartMoneyEngine:
                     "stage_200_done": False,
                     "peak_pnl_pct": 0,
                     "trailing_active": False,
-                    "tracked_balances": {},  # 복원 시점에 추적 못 함
+                    "tracked_balances": tracked_balances,  # ✅ 재조회 결과
                     "tracker_check_interval": 0,
+                    # 가격 조회 연속 실패 카운터 (영구 실패 시 강제 청산)
+                    "price_fail_count": 0,
                 }
                 restored += 1
-                logger.info(f"  ♻️  DB 복원: ${symbol} ({mint[:8]}..) {amount_sol:.4f} SOL")
+                logger.info(
+                    f"  ♻️  DB 복원: ${symbol} ({mint[:8]}..) {amount_sol:.4f} SOL "
+                    f"(추적자 잔고 {len(tracked_balances)}/{len(buyers)})"
+                )
 
             if restored > 0:
                 self._save_positions()

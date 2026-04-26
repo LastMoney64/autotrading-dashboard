@@ -452,6 +452,7 @@ class MomentumSocialEngine:
             # 트레일링 스탑
             "peak_pnl_pct": 0,
             "trailing_active": False,
+            "price_fail_count": 0,  # 가격 조회 연속 실패 카운터
         }
         self.recent_attempts[mint] = int(time.time())
 
@@ -521,9 +522,19 @@ class MomentumSocialEngine:
         if not pos:
             return
 
-        # 현재 가격 + 거래량
+        # 현재 가격 (실패 시 카운터 증가, 5회 연속 실패 → 강제 청산)
         current_price = await self._get_token_price_sol(mint, pos["decimals"])
-        if not current_price or pos["entry_price_sol"] <= 0:
+        if not current_price:
+            pos["price_fail_count"] = pos.get("price_fail_count", 0) + 1
+            if pos["price_fail_count"] >= 5:
+                logger.warning(
+                    f"  ⚠️  ${pos.get('symbol','?')} 가격 조회 5회 연속 실패 → 강제 청산"
+                )
+                await self._sell(mint, 100, "⚠️ 좀비 포지션 강제 청산 (가격 조회 불가)")
+            return
+        pos["price_fail_count"] = 0  # 성공 시 리셋
+
+        if pos["entry_price_sol"] <= 0:
             return
 
         pnl_pct = (current_price - pos["entry_price_sol"]) / pos["entry_price_sol"] * 100
