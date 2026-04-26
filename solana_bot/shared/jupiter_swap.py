@@ -14,14 +14,17 @@ Jupiter는 Raydium, Orca, Meteora 등 모든 솔라나 DEX 통합 라우터.
 import logging
 import asyncio
 import base64
+import os
 from typing import Optional
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Jupiter API endpoints
-JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP = "https://quote-api.jup.ag/v6/swap"
+# Jupiter API endpoints (2025년 변경: quote-api.jup.ag → lite-api.jup.ag)
+# 무료 lite 엔드포인트 사용 (rate limit 있지만 충분)
+# 환경변수로 override 가능 (URL 다시 바뀌면 즉시 대응)
+JUPITER_QUOTE = os.getenv("JUPITER_QUOTE_URL", "https://lite-api.jup.ag/swap/v1/quote").strip()
+JUPITER_SWAP = os.getenv("JUPITER_SWAP_URL", "https://lite-api.jup.ag/swap/v1/swap").strip()
 
 # 솔라나 토큰 주소
 SOL_MINT = "So11111111111111111111111111111111111111112"  # Wrapped SOL

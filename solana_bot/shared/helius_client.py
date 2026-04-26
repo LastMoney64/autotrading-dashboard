@@ -261,7 +261,7 @@ class HeliusClient:
         self, wallet: str, since_seconds: int = 600
     ) -> list[dict]:
         """
-        최근 N초 내 지갑이 매수한 토큰
+        최근 N초 내 지갑이 매수한 토큰 (밈코인만, stablecoin/메이저 제외)
 
         Returns: [{
             "signature": str,
@@ -273,6 +273,19 @@ class HeliusClient:
         import time
         now = int(time.time())
         cutoff = now - since_seconds
+
+        # 매수 대상에서 제외할 토큰 (stablecoin + 메이저 = 알파 아님)
+        EXCLUDED_MINTS = {
+            "So11111111111111111111111111111111111111112",  # Wrapped SOL
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK (메이저, 알파 X)
+            "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",  # WIF (메이저)
+            "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",   # JUP
+            "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",  # ETH (Wormhole)
+            "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",   # cbBTC
+            "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",  # WBTC
+        }
 
         txs = await self.get_wallet_transactions(wallet, limit=30)
         buys = []
@@ -296,7 +309,8 @@ class HeliusClient:
                     if mint == "So11111111111111111111111111111111111111112":
                         sol_out += amt
                 if to_addr == wallet_lower:
-                    if mint != "So11111111111111111111111111111111111111112":
+                    # stablecoin/메이저 토큰 제외 (밈코인만 카피)
+                    if mint not in EXCLUDED_MINTS:
                         tokens_in.append({"mint": mint, "amount": amt})
 
             # SOL 보내고 토큰 받았으면 = 매수
