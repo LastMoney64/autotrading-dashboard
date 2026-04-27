@@ -69,12 +69,12 @@ class PumpFunSniperEngine:
         self.scan_interval = 60   # 1분마다 (가장 빠름)
         self.max_positions = 5    # 동시 보유 최대 5개
 
-        # 진입 필터
-        self.min_progress_pct = 80   # 본딩커브 80%+
-        self.max_progress_pct = 97   # 너무 임박해도 안 됨 (이미 늦음)
-        self.min_volume_1h_sol = 1.0 # 1시간 거래량 1 SOL+
-        self.min_unique_traders = 15 # 매수자 분산
-        self.min_buy_ratio = 0.55    # 매수가 55%+ (매도 우세 X)
+        # 진입 필터 (현실 반영해 완화)
+        self.min_progress_pct = 75   # 본딩커브 75%+ (80→75: 더 일찍 진입)
+        self.max_progress_pct = 99   # 99%까지 OK (졸업 직전도 OK)
+        self.min_volume_1h_sol = 0.3 # 1시간 거래량 0.3 SOL+ (1.0→0.3)
+        self.min_unique_traders = 8  # 매수자 8명+ (15→8)
+        self.min_buy_ratio = 0.50    # 매수 50%+ (55→50, 균형)
 
         # 청산 파라미터 — 문샷 친화 (1000x 잡기)
         self.stop_loss_pct = -50          # -50% 손절

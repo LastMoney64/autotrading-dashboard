@@ -76,14 +76,14 @@ class MomentumSocialEngine:
         self.scan_interval = 900   # 15분마다
         self.max_positions = 4    # 동시 보유 최대 4개
 
-        # 진입 필터
-        self.min_volume_change_pct = 200  # 거래량 1H가 6H 평균의 3배+ (실질 2x+)
-        self.min_volume_24h_usd = 50_000  # 최소 거래량
-        self.min_buy_ratio = 0.55         # 매수 우세
-        self.min_market_cap = 50_000      # $50K
+        # 진입 필터 (현실 반영 완화 — 트위터 멘션 의존도 낮춤)
+        self.min_volume_change_pct = 150  # 1H가 6H 평균의 1.5배+ (200→150)
+        self.min_volume_24h_usd = 30_000  # 최소 거래량 (50K→30K)
+        self.min_buy_ratio = 0.52         # 매수 우세 (55→52)
+        self.min_market_cap = 30_000      # $30K (50K→30K, 더 일찍)
         self.max_market_cap = 5_000_000   # $5M
-        self.min_mention_count = 5        # 최소 트윗 멘션
-        self.min_combined_score = 0.5     # 합산 점수
+        self.min_mention_count = 0        # 트윗 의존 제거 (5→0, Nitter 불안정)
+        self.min_combined_score = 0.35    # 합산 점수 (0.5→0.35)
 
         # 청산 — 문샷 친화 (모멘텀도 1000x 잡기)
         self.stop_loss_pct = -25

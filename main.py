@@ -544,10 +544,11 @@ async def main_loop(system: dict):
     # 모닝브리프에 봇들 연결 (모든 초기화 끝난 후)
     morning_brief.polymarket_engine = polymarket_engine
     morning_brief.solana_engines = solana_engines
-    # 텔레그램 명령어용 (!positions, !stats, !wallets, !balance, !reset_solana)
+    # 텔레그램 명령어용 (!positions, !stats, !wallets, !balance, !reset_solana, !discover)
     telegram.solana_engines = solana_engines
     telegram.polymarket_engine = polymarket_engine
     telegram.okx = okx
+    # telegram.wallet_discovery는 아래 weekly_report 블록 후에 주입됨
 
     # ── 주간 리포트 + 지갑 자동 발굴 초기화 ──────────
     weekly_report = None
@@ -578,6 +579,9 @@ async def main_loop(system: dict):
         logger.info(
             f"📊 주간 리포트 활성 (매주 일요일 {settings.weekly_report_hour_kst}시 KST)"
         )
+
+    # 텔레그램 !discover 명령어용 주입 (wallet_discovery 정의 후)
+    telegram.wallet_discovery = wallet_discovery
 
     # ── 시작 시 즉시 스마트머니 발굴 (1회만) ─────────
     if wallet_discovery and os.getenv("STARTUP_WALLET_DISCOVERY", "false").strip().lower() == "true":

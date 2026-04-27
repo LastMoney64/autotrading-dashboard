@@ -63,6 +63,9 @@ class TelegramMonitor:
             # 잔고 조회 (모든 봇 지갑)
             "!balance": self._cmd_balance,
             "!잔고": self._cmd_balance,
+            # 추적 지갑 발굴 (수동 트리거)
+            "!discover": self._cmd_discover_wallets,
+            "!발굴": self._cmd_discover_wallets,
             # 데이터 리셋 (위험 — 확인 필요)
             "!reset_solana": self._cmd_reset_solana,
         }
@@ -75,6 +78,7 @@ class TelegramMonitor:
         self.solana_engines: dict = {}
         self.polymarket_engine = None
         self.okx = None  # OKX 잔고 조회용
+        self.wallet_discovery = None  # WalletDiscovery 인스턴스 (!discover 용)
 
     @property
     def is_configured(self) -> bool:
@@ -735,6 +739,62 @@ class TelegramMonitor:
             )
         except Exception as e:
             await self.send(f"❌ 리셋 중 에러: {e}")
+
+    # ────────────────────────────────────────────
+    # 추적 지갑 즉시 발굴 (!discover)
+    # ────────────────────────────────────────────
+
+    async def _cmd_discover_wallets(self, _: str):
+        """수동 트리거: 즉시 GMGN + DexScreener에서 추적 지갑 발굴"""
+        if not self.wallet_discovery:
+            await self.send("⚠️ wallet_discovery 비활성 (auto_wallet_discovery=false?)")
+            return
+
+        await self.send(
+            "🔍 <b>스마트머니 지갑 발굴 시작</b>\n\n"
+            "GMGN OpenAPI + DexScreener + Pump.fun 졸업 토큰 분석\n"
+            "<i>(약 1~3분 소요)</i>"
+        )
+        try:
+            result = await self.wallet_discovery.discover_and_add()
+            added = result.get("added", 0)
+            gmgn_added = result.get("gmgn_added", 0)
+            checked = result.get("checked", 0)
+            qualified = result.get("qualified", 0)
+
+            if added > 0:
+                lines = [
+                    f"✅ <b>발굴 완료</b>\n",
+                    f"🎯 GMGN 직접: {gmgn_added}개",
+                    f"🔍 Helius 분석: {checked}개 검사 → {qualified}개 통과",
+                    f"📥 총 추가: {added}개\n",
+                    "<b>새 지갑:</b>",
+                ]
+                for w in result.get("new_wallets", [])[:10]:
+                    s = w.get("stats", {})
+                    src = s.get("source", "")
+                    addr = w["address"]
+                    if src == "gmgn":
+                        name_str = f" ({s.get('name')})" if s.get('name') else ""
+                        lines.append(
+                            f"• <code>{addr[:8]}..{addr[-4:]}</code> "
+                            f"🎯 GMGN/{s.get('tag','smart_money')}{name_str}"
+                        )
+                    else:
+                        lines.append(
+                            f"• <code>{addr[:8]}..{addr[-4:]}</code> "
+                            f"📊 WR:{s.get('win_rate',0)*100:.0f}%"
+                        )
+                await self.send("\n".join(lines))
+            else:
+                await self.send(
+                    f"🔍 <b>발굴 결과</b>\n\n"
+                    f"🎯 GMGN: {gmgn_added}개\n"
+                    f"🔍 Helius: {checked}개 검사 → 0개 통과\n"
+                    "<i>새 지갑 없음 (이미 추적 중이거나 기준 미달)</i>"
+                )
+        except Exception as e:
+            await self.send(f"❌ 발굴 실패: {str(e)[:200]}")
 
     # ────────────────────────────────────────────
     # 추적 지갑 목록
