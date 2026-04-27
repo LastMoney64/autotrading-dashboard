@@ -210,9 +210,16 @@ class SmartMoneyEngine:
         if not active:
             return {}
 
+        # 정렬: weight × win_rate 높은 순 (좋은 지갑 우선)
+        active.sort(
+            key=lambda w: w.get("weight", 1.0) * w.get("win_rate", 0.5),
+            reverse=True,
+        )
+
         signals: dict[str, list[dict]] = {}
 
-        for w in active[:10]:  # 최대 10개 지갑 (rate limit)
+        # Helius 한도 고려: 상위 12개 (5분마다 × 12 = 시간당 144 → 일일 3,456)
+        for w in active[:12]:
             try:
                 buys = await self.helius.get_recent_token_buys(
                     w["address"], since_seconds=600  # 10분

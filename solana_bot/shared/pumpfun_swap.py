@@ -131,14 +131,18 @@ class PumpFunSwap:
     # ──────────────────────────────────────────────
 
     async def is_buyable(self, mint: str) -> bool:
-        """본딩커브에서 매수 가능한 토큰인지 (졸업 안 됨 + 유동성 있음)"""
+        """본딩커브에서 매수 가능한 토큰인지 (졸업 안 됨)"""
         info = await self.get_token_info(mint)
         if not info:
             return False
         if info.get("complete"):
             return False  # 졸업 후 → Jupiter 사용
-        # 최소 유동성: virtual_sol_reserves > 5 SOL (너무 초기는 위험)
-        if info.get("virtual_sol_reserves", 0) < 5:
+        # virtual_sol_reserves 시작값 = 30 SOL (Pump.fun 기본)
+        # 0 또는 음수면 데이터 이상
+        if info.get("virtual_sol_reserves", 0) <= 0:
+            return False
+        # virtual_token_reserves 도 양수여야
+        if info.get("virtual_token_reserves", 0) <= 0:
             return False
         return True
 

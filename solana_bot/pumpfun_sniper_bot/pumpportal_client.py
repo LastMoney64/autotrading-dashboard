@@ -66,12 +66,12 @@ class PumpPortalClient:
         """
         try:
             session = await self._get_session()
-            # Pump.fun "currently live" 정렬 = market cap desc
+            # market_cap 정렬 → 본딩커브 진행률 높은 토큰 우선
             url = f"{PUMPFUN_API}/coins"
             params = {
                 "offset": 0,
-                "limit": limit,
-                "sort": "currently_live",  # 또는 "market_cap"
+                "limit": max(limit, 200),  # 최소 200개 (필터 통과 늘리기)
+                "sort": "market_cap",       # 시총 높은 순 = 본딩커브 진행도 높음
                 "order": "DESC",
                 "includeNsfw": "false",
             }
