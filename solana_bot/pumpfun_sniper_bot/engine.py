@@ -71,7 +71,8 @@ class PumpFunSniperEngine:
 
         # 진입 필터 (현실 반영해 완화)
         self.min_progress_pct = 75   # 본딩커브 75%+ (80→75: 더 일찍 진입)
-        self.max_progress_pct = 99   # 99%까지 OK (졸업 직전도 OK)
+        self.max_progress_pct = 100  # 100%까지 OK (졸업 직전 토큰 = 진짜 알파)
+        # is_buyable이 complete=true (졸업 완료) 토큰 자동 차단하므로 안전
         self.min_volume_1h_sol = 0.3 # 1시간 거래량 0.3 SOL+ (1.0→0.3)
         self.min_unique_traders = 8  # 매수자 8명+ (15→8)
         self.min_buy_ratio = 0.50    # 매수 50%+ (55→50, 균형)
