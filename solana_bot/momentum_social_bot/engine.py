@@ -571,17 +571,21 @@ class MomentumSocialEngine:
             await self._sell(mint, 100, f"💸 손절 {pnl_pct:.1f}%")
             return
 
-        # 2. 동적 트레일링 (peak 클수록 wider — 문샷 따라가기)
+        # 2. 동적 트레일링 (peak 클수록 wider — 문샷 따라가기, 비율 기반)
         trailing_drop = self._get_trailing_drop(peak)
         if trailing_drop is not None:
             pos["trailing_active"] = True
-            drop_from_peak = peak - pnl_pct
-            if drop_from_peak >= trailing_drop:
-                await self._sell(
-                    mint, 100,
-                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, drop {drop_from_peak:.0f}% ≥ 한도 {trailing_drop:.0f}%)"
-                )
-                return
+            peak_value = 1.0 + peak / 100.0
+            current_value = 1.0 + pnl_pct / 100.0
+            if peak_value > 0:
+                drop_ratio_pct = (peak_value - current_value) / peak_value * 100.0
+                if drop_ratio_pct >= trailing_drop:
+                    await self._sell(
+                        mint, 100,
+                        f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, "
+                        f"가격 -{drop_ratio_pct:.0f}% ≥ 한도 -{trailing_drop:.0f}%)"
+                    )
+                    return
 
         # 3. 부분 익절 (45% 회수, 55% moonbag)
         if pnl_pct >= 50 and not pos["tp_done"][0]:

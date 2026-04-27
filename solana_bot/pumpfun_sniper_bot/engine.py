@@ -307,6 +307,8 @@ class PumpFunSniperEngine:
     async def _filter_candidates(self, candidates: list[dict]) -> list[dict]:
         """진입 가능 후보만 필터"""
         filtered = []
+        # 차단 통계 (디버깅)
+        blocks = {"progress": 0, "owned": 0, "cooldown": 0, "volume": 0, "traders": 0, "buy_ratio": 0}
 
         for c in candidates:
             try:
@@ -315,24 +317,30 @@ class PumpFunSniperEngine:
 
                 # 1. 진행률 범위
                 if progress < self.min_progress_pct or progress > self.max_progress_pct:
+                    blocks["progress"] += 1
                     continue
 
                 # 2. 이미 보유 중
                 if mint in self.positions:
+                    blocks["owned"] += 1
                     continue
 
                 # 3. 최근 매수 시도한 토큰 (5분 쿨다운)
                 if mint in self.recent_buys:
                     if time.time() - self.recent_buys[mint] < 300:
+                        blocks["cooldown"] += 1
                         continue
 
                 # 4. 거래량 + 매수 비율 체크
                 volume = await self.pump.get_volume_recent(mint, minutes=60)
                 if volume["volume_sol"] < self.min_volume_1h_sol:
+                    blocks["volume"] += 1
                     continue
                 if volume["unique_traders"] < self.min_unique_traders:
+                    blocks["traders"] += 1
                     continue
                 if volume["buy_ratio"] < self.min_buy_ratio:
+                    blocks["buy_ratio"] += 1
                     continue
 
                 # 5. 토큰 정보 추가
@@ -347,6 +355,14 @@ class PumpFunSniperEngine:
                 await asyncio.sleep(0.3)  # rate limit 보호
             except Exception as e:
                 logger.debug(f"필터 에러 {c.get('mint', '?')[:10]}: {e}")
+
+        # 차단 통계 로그 (모두 0개 차단되면 안 보임)
+        if not filtered and any(blocks.values()):
+            logger.info(
+                f"  🚫 차단 사유: "
+                f"진행률 {blocks['progress']} / 보유 {blocks['owned']} / 쿨다운 {blocks['cooldown']} / "
+                f"거래량 {blocks['volume']} / 매수자 {blocks['traders']} / 매수비율 {blocks['buy_ratio']}"
+            )
 
         # 점수 순 정렬
         filtered.sort(key=lambda x: x["score"], reverse=True)
@@ -617,17 +633,21 @@ class PumpFunSniperEngine:
             await self._sell(mint, 100, f"💸 손절 {pnl_pct:.1f}%")
             return
 
-        # 3. 동적 트레일링 (peak 클수록 wider — 문샷 따라가기)
+        # 3. 동적 트레일링 (peak 클수록 wider — 문샷 따라가기, 비율 기반)
         trailing_drop = self._get_trailing_drop(peak)
         if trailing_drop is not None:
             pos["trailing_active"] = True
-            drop_from_peak = peak - pnl_pct
-            if drop_from_peak >= trailing_drop:
-                await self._sell(
-                    mint, 100,
-                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, drop {drop_from_peak:.0f}% ≥ 한도 {trailing_drop:.0f}%)"
-                )
-                return
+            peak_value = 1.0 + peak / 100.0
+            current_value = 1.0 + pnl_pct / 100.0
+            if peak_value > 0:
+                drop_ratio_pct = (peak_value - current_value) / peak_value * 100.0
+                if drop_ratio_pct >= trailing_drop:
+                    await self._sell(
+                        mint, 100,
+                        f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, "
+                        f"가격 -{drop_ratio_pct:.0f}% ≥ 한도 -{trailing_drop:.0f}%)"
+                    )
+                    return
 
         # 4. 부분 익절 (50% 회수, 50% moonbag)
         if pnl_pct >= 50 and not pos["tp_done"][0]:

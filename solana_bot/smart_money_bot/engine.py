@@ -67,7 +67,7 @@ class SmartMoneyEngine:
         self.max_buy_sol = settings.solana_max_buy_sol
         self.scan_interval = 300  # 5분마다 스캔
         self.consensus_threshold = 2  # 같은 토큰 2명 이상 매수 시 진입
-        self.high_winrate_solo = 0.75  # win_rate 75%+ 단독 시그널 OK
+        self.high_winrate_solo = 0.55  # win_rate 55%+ 단독 시그널 OK (75→55 완화)
 
         # 청산 파라미터 — 문샷 친화적 (1000x까지 잡기)
         self.stop_loss_pct = -30                 # 손절 -30%
@@ -597,17 +597,23 @@ class SmartMoneyEngine:
 
         # ════════════════════════════════════════════════
         # 3순위: 동적 트레일링 스탑 (PnL 클수록 wider — 문샷 따라가기)
+        # 비율 기반 drop 계산 (percentage point 아님!)
         # ════════════════════════════════════════════════
         trailing_drop = self._get_trailing_drop(peak)
         if trailing_drop is not None:
             pos["trailing_active"] = True
-            drop_from_peak = peak - pnl_pct
-            if drop_from_peak >= trailing_drop:
-                await self._sell_position(
-                    mint, 100,
-                    f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, drop {drop_from_peak:.0f}% ≥ 한도 {trailing_drop:.0f}%)"
-                )
-                return
+            # peak 대비 가격 비율 하락 (peak +500% = 6배, 한도 -35% → 6×0.65=3.9배=+290%까지 보유)
+            peak_value = 1.0 + peak / 100.0
+            current_value = 1.0 + pnl_pct / 100.0
+            if peak_value > 0:
+                drop_ratio_pct = (peak_value - current_value) / peak_value * 100.0
+                if drop_ratio_pct >= trailing_drop:
+                    await self._sell_position(
+                        mint, 100,
+                        f"🎯 트레일링 청산 (peak +{peak:.0f}% → 현재 {pnl_pct:+.0f}%, "
+                        f"가격 -{drop_ratio_pct:.0f}% ≥ 한도 -{trailing_drop:.0f}%)"
+                    )
+                    return
 
         # ════════════════════════════════════════════════
         # 4순위: 부분 청산 (42% 회수, 58% moonbag)
