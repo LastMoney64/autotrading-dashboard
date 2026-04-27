@@ -70,12 +70,12 @@ class PumpFunSniperEngine:
         self.max_positions = 5    # 동시 보유 최대 5개
 
         # 진입 필터 (현실 반영해 완화)
-        self.min_progress_pct = 75   # 본딩커브 75%+ (80→75: 더 일찍 진입)
-        self.max_progress_pct = 100  # 100%까지 OK (졸업 직전 토큰 = 진짜 알파)
-        # is_buyable이 complete=true (졸업 완료) 토큰 자동 차단하므로 안전
-        self.min_volume_1h_sol = 0.3 # 1시간 거래량 0.3 SOL+ (1.0→0.3)
-        self.min_unique_traders = 8  # 매수자 8명+ (15→8)
-        self.min_buy_ratio = 0.50    # 매수 50%+ (55→50, 균형)
+        self.min_progress_pct = 75   # 본딩커브 75%+
+        self.max_progress_pct = 100  # 100%까지 OK
+        # is_buyable이 complete=true (졸업 완료) 토큰 자동 차단
+        self.min_volume_1h_sol = 0.1 # 1H 거래량 0.1 SOL+ (0.3→0.1: 작은 펌프도 OK)
+        self.min_unique_traders = 5  # 매수자 5명+ (8→5: 신생 토큰도 OK)
+        self.min_buy_ratio = 0.50    # 매수 50%+ (균형 유지)
 
         # 청산 파라미터 — 문샷 친화 (1000x 잡기)
         self.stop_loss_pct = -50          # -50% 손절

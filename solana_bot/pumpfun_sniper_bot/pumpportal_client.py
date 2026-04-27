@@ -66,12 +66,14 @@ class PumpPortalClient:
         """
         try:
             session = await self._get_session()
-            # market_cap 정렬 → 본딩커브 진행률 높은 토큰 우선
+            # last_trade_timestamp 정렬 → 최근 거래 활발한 토큰 우선
+            # 시총 큰 토큰은 이미 졸업 완료/임박 → 거래 X
+            # 거래 활발한 토큰 = 진짜 펌프 중 = 졸업 가능성 높음
             url = f"{PUMPFUN_API}/coins"
             params = {
                 "offset": 0,
-                "limit": max(limit, 200),  # 최소 200개 (필터 통과 늘리기)
-                "sort": "market_cap",       # 시총 높은 순 = 본딩커브 진행도 높음
+                "limit": max(limit, 200),
+                "sort": "last_trade_timestamp",  # 최근 거래 활발 순
                 "order": "DESC",
                 "includeNsfw": "false",
             }
