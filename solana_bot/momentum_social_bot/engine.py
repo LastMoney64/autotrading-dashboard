@@ -73,7 +73,7 @@ class MomentumSocialEngine:
         # 매매 파라미터
         self.mode = settings.solana_mode
         self.max_buy_sol = 0.04   # 거래당 0.04 SOL (~$6)
-        self.scan_interval = 900   # 15분마다
+        self.scan_interval = 300   # 5분마다 (15분→5분: 큰 폭락 빠른 대응)
         self.max_positions = 4    # 동시 보유 최대 4개
 
         # 진입 필터 (현실 반영 완화 — 트위터 멘션 의존도 낮춤)

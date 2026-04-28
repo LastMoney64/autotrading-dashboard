@@ -119,6 +119,40 @@ def add_wallet(wallet_dict: dict, save: bool = True) -> bool:
     return True
 
 
+def cleanup_inactive_wallets(keep_seeds: bool = True) -> int:
+    """
+    비활성 지갑 자동 제거 (자기학습 결과 저조 → 자동 발굴이 빈자리 채움)
+
+    제거 기준:
+    - active=False (win_rate < 0.40 도달했음)
+    - keep_seeds=True 이면 시드 지갑 5개는 유지
+
+    Returns: 제거된 지갑 수
+    """
+    seed_addrs = {w["address"] for w in _SEED_WALLETS}
+
+    before = len(TRACKED_WALLETS)
+    survivors = []
+    removed = []
+    for w in TRACKED_WALLETS:
+        if w.get("active", False):
+            survivors.append(w)
+        elif keep_seeds and w["address"] in seed_addrs:
+            survivors.append(w)  # 시드는 유지
+        else:
+            removed.append(w)
+
+    if removed:
+        TRACKED_WALLETS[:] = survivors
+        save_wallets()
+        logger.info(
+            f"🗑️  비활성 지갑 {len(removed)}개 제거 "
+            f"({before} → {len(TRACKED_WALLETS)})"
+        )
+
+    return len(removed)
+
+
 def update_wallet_stats(address: str, won: bool, save: bool = True):
     """매매 결과로 지갑 통계 자동 업데이트 (자기학습)
 

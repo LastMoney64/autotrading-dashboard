@@ -64,8 +64,9 @@ class SmartMoneyEngine:
 
         # 매매 파라미터
         self.mode = settings.solana_mode  # "paper" or "live"
-        self.max_buy_sol = settings.solana_max_buy_sol
+        self.max_buy_sol = 0.03  # SmartMoney 전용: 0.03 SOL (잔고 분산, 더 많은 토큰 다양화)
         self.scan_interval = 300  # 5분마다 스캔
+        self.max_positions = 8    # 동시 보유 최대 8개 (0.03 × 8 = 0.24 SOL)
         self.consensus_threshold = 2  # 같은 토큰 2명 이상 매수 시 진입
         self.high_winrate_solo = 0.55  # win_rate 55%+ 단독 시그널 OK (75→55 완화)
 
@@ -301,6 +302,12 @@ class SmartMoneyEngine:
     async def _try_buy(self, opp: dict):
         """안전 검증 → 매수 → 포지션 등록"""
         mint = opp["mint"]
+
+        # 동시 보유 한도 체크
+        if len(self.positions) >= self.max_positions:
+            logger.info(f"  📊 보유 한도 도달 {len(self.positions)}/{self.max_positions} — 매수 스킵")
+            return
+
         logger.info(f"  🔍 안전 검증: {mint[:10]}... ({opp['signal_type']})")
 
         # 안전성 5중 검증

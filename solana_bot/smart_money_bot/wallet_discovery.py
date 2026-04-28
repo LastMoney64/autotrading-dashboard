@@ -386,7 +386,14 @@ class WalletDiscovery:
             "new_wallets": [...]
         }
         """
-        from solana_bot.smart_money_bot.wallets import TRACKED_WALLETS, add_wallet, save_wallets
+        from solana_bot.smart_money_bot.wallets import (
+            TRACKED_WALLETS, add_wallet, save_wallets, cleanup_inactive_wallets,
+        )
+
+        # 발굴 전 비활성 지갑 자동 정리 (자기학습 결과 저조 지갑 제거)
+        removed_count = cleanup_inactive_wallets(keep_seeds=True)
+        if removed_count > 0:
+            logger.info(f"  🗑️ 비활성 지갑 {removed_count}개 자동 제거 (재발굴로 대체)")
 
         existing_addrs = {w["address"] for w in TRACKED_WALLETS}
         new_wallets_added: list[dict] = []

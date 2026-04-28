@@ -473,15 +473,15 @@ async def main_loop(system: dict):
     )
 
     if settings.solana_enabled and settings.helius_api_key:
-        # ── 봇별 안전 필터 차등 설정 ───────────────────
+        # ── 봇별 안전 필터 차등 설정 (현실 반영 완화) ──
         # 솔라나 밈코인 95%가 상위10 30%+ — 봇 특성에 맞게 완화
-        # SmartMoney: 추적 지갑이 1차 검증 → 40%
+        # SmartMoney: 추적 지갑이 1차 검증 → 50%
         # PumpFun: 졸업 직전 = 본질적으로 집중됨 → 60%
-        # Momentum: 거래량+소셜 검증 → 45%
+        # Momentum: 거래량+소셜 검증 → 50%
         safety_configs = {
-            "smart_money":     {"max_top10_percent": 40.0, "min_lp_usd": 5000, "min_volume_24h_usd": 1000},
-            "pumpfun_sniper":  {"max_top10_percent": 60.0, "min_lp_usd": 3000, "min_volume_24h_usd": 500},
-            "momentum_social": {"max_top10_percent": 45.0, "min_lp_usd": 5000, "min_volume_24h_usd": 1000},
+            "smart_money":     {"max_top10_percent": 50.0, "min_lp_usd": 4000, "min_volume_24h_usd": 1000},
+            "pumpfun_sniper":  {"max_top10_percent": 60.0, "min_lp_usd": 2000, "min_volume_24h_usd": 300},
+            "momentum_social": {"max_top10_percent": 50.0, "min_lp_usd": 4000, "min_volume_24h_usd": 1000},
         }
 
         bot_configs = [
@@ -695,6 +695,29 @@ async def main_loop(system: dict):
                             await weekly_report.generate_and_send()
                     except Exception as e:
                         logger.warning(f"주간 리포트 에러: {e}")
+
+                # ── 매일 지갑 발굴 (오전 3시 KST = UTC 18시) ────
+                # 새 지갑 발굴 + 비활성 지갑 정리
+                if wallet_discovery:
+                    try:
+                        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                        _kst_now = _dt.now(_tz(_td(hours=9)))
+                        # 매일 오전 3시 KST에 1회 실행
+                        if (_kst_now.hour == 3 and _kst_now.minute < 5
+                            and not getattr(wallet_discovery, "_last_daily_run", None)
+                                or (getattr(wallet_discovery, "_last_daily_run", None) != _kst_now.date()
+                                    and _kst_now.hour == 3 and _kst_now.minute < 5)):
+                            logger.info("🔍 매일 자동 발굴 시작 (3시 KST)")
+                            result = await wallet_discovery.discover_and_add()
+                            wallet_discovery._last_daily_run = _kst_now.date()
+                            added = result.get("added", 0)
+                            if added > 0:
+                                await telegram.send(
+                                    f"🔍 <b>매일 발굴</b>\n"
+                                    f"+{added}개 추가 (GMGN {result.get('gmgn_added',0)})"
+                                )
+                    except Exception as e:
+                        logger.warning(f"매일 발굴 에러: {e}")
 
                 # ── Polymarket 봇 (60분마다) ─────────────
                 if polymarket_engine:
