@@ -507,6 +507,7 @@ class PumpFunSniperEngine:
             "peak_pnl_pct": 0,
             "trailing_active": False,
             "price_fail_count": 0,  # 가격 조회 연속 실패 카운터
+            "sell_fail_count": 0,   # 매도 실패 연속 카운터
             "route": route_via,     # pumpfun or jupiter
         }
         self.recent_buys[mint] = int(time.time())
@@ -746,11 +747,26 @@ class PumpFunSniperEngine:
                 if result and result.get("confirmed"):
                     signature = result["signature"]
                     sol_received = result["output_amount_sol"]
+                    pos["sell_fail_count"] = 0
                 else:
-                    logger.warning(f"  ❌ 매도 실패")
+                    pos["sell_fail_count"] = pos.get("sell_fail_count", 0) + 1
+                    fail_count = pos["sell_fail_count"]
+                    logger.warning(f"  ❌ 매도 실패 — {fail_count}회 연속")
+                    if fail_count >= 5:
+                        logger.warning(f"  ⚠️ ${symbol} 매도 5회 실패 → 강제 제거")
+                        self.positions.pop(mint, None)
+                        self._save_positions()
+                        try:
+                            await self.telegram.send(
+                                f"⚠️ <b>PumpFun: 강제 포지션 제거</b>\n"
+                                f"${symbol} 매도 5회 실패 — Phantom 수동 매도 필요"
+                            )
+                        except Exception:
+                            pass
                     return
             except Exception as e:
                 logger.error(f"  ❌ 매도 에러: {e}")
+                pos["sell_fail_count"] = pos.get("sell_fail_count", 0) + 1
                 return
         else:
             current = await self._get_token_price_sol(mint, pos["decimals"])

@@ -463,6 +463,8 @@ class SmartMoneyEngine:
             "tracker_check_interval": 0,             # 추적자 체크 카운터 (5분마다 체크 비싸서)
             # 가격 조회 연속 실패 카운터
             "price_fail_count": 0,
+            # 매도 실패 연속 카운터 (Token-2022 등 swap 안 되는 토큰)
+            "sell_fail_count": 0,
             # 매매 라우트 (jupiter or pumpfun)
             "route": route_via,
         }
@@ -776,11 +778,37 @@ class SmartMoneyEngine:
                 if result and result.get("confirmed"):
                     signature = result["signature"]
                     sol_received = result.get("output_amount_sol", 0)
+                    pos["sell_fail_count"] = 0  # 성공 시 리셋
                 else:
-                    logger.warning(f"  ❌ 매도 실패 (via {route})")
+                    # 매도 실패 — 카운터 증가
+                    pos["sell_fail_count"] = pos.get("sell_fail_count", 0) + 1
+                    fail_count = pos["sell_fail_count"]
+                    logger.warning(f"  ❌ 매도 실패 (via {route}) — {fail_count}회 연속")
+
+                    # 5회 연속 실패 → 강제 포지션 제거 (좀비 포지션 방지)
+                    if fail_count >= 5:
+                        logger.warning(
+                            f"  ⚠️ ${symbol} 매도 5회 연속 실패 → 강제 포지션 제거 "
+                            f"(Token-2022 등 swap 불가 토큰 가능성)"
+                        )
+                        # 포지션 완전 제거
+                        self.positions.pop(mint, None)
+                        self._save_positions()
+                        # 텔레그램 경고
+                        try:
+                            await self.telegram.send(
+                                f"⚠️ <b>SmartMoney: 강제 포지션 제거</b>\n\n"
+                                f"<b>토큰:</b> ${symbol}\n"
+                                f"<b>주소:</b> <code>{mint[:8]}...{mint[-6:]}</code>\n"
+                                f"<b>이유:</b> 매도 5회 연속 실패 (swap 불가 토큰)\n\n"
+                                f"<i>Phantom 지갑에서 수동 매도 권장</i>"
+                            )
+                        except Exception:
+                            pass
                     return
             except Exception as e:
                 logger.error(f"  ❌ 매도 에러: {e}")
+                pos["sell_fail_count"] = pos.get("sell_fail_count", 0) + 1
                 return
         else:
             # paper: 가상 매도
