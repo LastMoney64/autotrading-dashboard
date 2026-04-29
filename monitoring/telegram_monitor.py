@@ -686,6 +686,9 @@ class TelegramMonitor:
 
         # 실행 — 확인됨
         results = []
+        # paper 시작 잔고: 환경변수 PAPER_INITIAL_SOL (기본 0.45) — 깨끗한 검증
+        import os as _os
+        paper_initial = float(_os.getenv("PAPER_INITIAL_SOL", "0.45"))
         try:
             # 1. 메모리 + 파일 정리 (각 봇)
             for bot_key, engine in self.solana_engines.items():
@@ -693,12 +696,11 @@ class TelegramMonitor:
                     engine.positions = {}
                     if hasattr(engine, "_save_positions"):
                         engine._save_positions()
-                    # paper_balance 리셋
-                    real_sol = await engine.client.get_sol_balance()
-                    engine.paper_balance = real_sol
+                    # paper_balance를 고정값으로 리셋 (0.45 SOL — 깨끗한 검증)
+                    engine.paper_balance = paper_initial
                     if hasattr(engine, "_save_paper_balance"):
                         engine._save_paper_balance()
-                    results.append(f"✅ {bot_key}: positions=0, paper={real_sol:.4f} SOL")
+                    results.append(f"✅ {bot_key}: positions=0, paper={paper_initial:.4f} SOL")
                 except Exception as e:
                     results.append(f"❌ {bot_key}: {e}")
 
