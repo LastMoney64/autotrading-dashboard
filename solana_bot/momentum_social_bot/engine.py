@@ -440,11 +440,13 @@ class MomentumSocialEngine:
             signature = "PAPER_" + str(int(time.time()))
             decimals = report["details"].get("decimals", 6)
             price_usd = opp.get("price_usd", 0)
-            output_amount = (
+            raw_output = (
                 int(buy_amount * 1e9 * (10 ** decimals) / 1000)
                 if not price_usd else
                 int(buy_amount * 150 / price_usd * (10 ** decimals))  # SOL ~$150
             )
+            # 현실 마찰: MEV(-3%) + 슬리피지(-2%) = -5%
+            output_amount = int(raw_output * 0.95)
 
         decimals = report["details"].get("decimals", 6)
         token_amount_ui = output_amount / (10 ** decimals)
@@ -454,6 +456,7 @@ class MomentumSocialEngine:
             "symbol": symbol,
             "entry_sol": buy_amount,
             "token_amount_raw": output_amount,
+            "original_token_amount_raw": output_amount,  # 부분 매도 PnL 정확 계산용
             "decimals": decimals,
             "entry_price_sol": buy_amount / token_amount_ui if token_amount_ui > 0 else 0,
             "entry_volume_24h": opp.get("volume_24h_usd", 0),
@@ -473,11 +476,12 @@ class MomentumSocialEngine:
         # 영구 저장
         self._save_positions()
 
-        # Paper 가상 잔고 차감
+        # Paper 가상 잔고 차감 (가스비 0.0005 SOL 추가)
         if self.mode == "paper":
-            self.paper_balance -= buy_amount
+            gas_fee = 0.0005
+            self.paper_balance -= (buy_amount + gas_fee)
             self._save_paper_balance()
-            logger.info(f"  💰 paper 잔고: {self.paper_balance:.4f} SOL (-{buy_amount:.4f})")
+            logger.info(f"  💰 paper 잔고: {self.paper_balance:.4f} SOL (-{buy_amount:.4f} + 가스 {gas_fee})")
 
         # DB
         try:
@@ -693,11 +697,18 @@ class MomentumSocialEngine:
                 pos["sell_fail_count"] = pos.get("sell_fail_count", 0) + 1
                 return
         else:
+            # paper: 현실 마찰 (슬리피지 5% + 가스비 0.0005)
             current = await self._get_token_price_sol(mint, pos["decimals"])
-            sol_received = sell_raw * (current or 0) / (10 ** pos["decimals"])
+            raw_sol = sell_raw * (current or 0) / (10 ** pos["decimals"])
+            sol_received = raw_sol * 0.95 - 0.0005
+            if sol_received < 0:
+                sol_received = 0
 
-        partial_entry = pos["entry_sol"] * percent / 100
-        pnl_pct = ((sol_received - partial_entry) / partial_entry * 100) if partial_entry else 0
+        # PnL — 매도하는 토큰 비율 정확히 반영
+        original_tokens = pos.get("original_token_amount_raw", pos["token_amount_raw"])
+        sell_ratio_total = sell_raw / max(original_tokens, 1)
+        sold_entry = pos["entry_sol"] * sell_ratio_total
+        pnl_pct = ((sol_received - sold_entry) / sold_entry * 100) if sold_entry > 0 else 0
 
         # 시간대별 학습 (자기학습 데이터)
         hour = pos.get("entry_hour_kst", 0)

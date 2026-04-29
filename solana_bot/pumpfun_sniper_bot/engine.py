@@ -470,7 +470,7 @@ class PumpFunSniperEngine:
                     slippage_bps=self.settings.solana_default_slippage_bps,
                     mode="paper",
                 )
-                output_amount = pf_result.get("output_amount", 0) if pf_result else 0
+                raw_output = pf_result.get("output_amount", 0) if pf_result else 0
             else:
                 quote = await self.jupiter.get_quote(
                     input_mint=SOL_MINT,
@@ -478,13 +478,15 @@ class PumpFunSniperEngine:
                     amount=int(buy_amount * 1e9),
                     slippage_bps=self.settings.solana_default_slippage_bps,
                 )
-                output_amount = int(quote.get("outAmount", 0)) if quote else 0
+                raw_output = int(quote.get("outAmount", 0)) if quote else 0
 
-            if output_amount <= 0:
+            if raw_output <= 0:
                 logger.warning(f"  ❌ paper 매수 견적 0 — 매수 취소")
                 self.recent_buys[mint] = int(time.time())
                 return False
 
+            # 현실 마찰 반영: MEV(-3%) + 슬리피지(-2%) = -5%
+            output_amount = int(raw_output * 0.95)
             signature = "PAPER_" + str(int(time.time()))
 
         # 포지션 등록
@@ -495,6 +497,7 @@ class PumpFunSniperEngine:
             "symbol": symbol,
             "name": token.get("name", ""),
             "entry_sol": buy_amount,
+            "original_token_amount_raw": output_amount,  # 부분 매도 PnL 정확 계산용 (불변)
             "token_amount_raw": output_amount,
             "token_amount_ui": token_amount_ui,
             "decimals": decimals,
@@ -517,9 +520,10 @@ class PumpFunSniperEngine:
 
         # Paper 가상 잔고 차감
         if self.mode == "paper":
-            self.paper_balance -= buy_amount
+            gas_fee = 0.0005
+            self.paper_balance -= (buy_amount + gas_fee)
             self._save_paper_balance()
-            logger.info(f"  💰 paper 잔고: {self.paper_balance:.4f} SOL (-{buy_amount:.4f})")
+            logger.info(f"  💰 paper 잔고: {self.paper_balance:.4f} SOL (-{buy_amount:.4f} + 가스 {gas_fee})")
 
         # DB
         try:
@@ -769,13 +773,19 @@ class PumpFunSniperEngine:
                 pos["sell_fail_count"] = pos.get("sell_fail_count", 0) + 1
                 return
         else:
+            # paper: 가상 매도 + 현실 마찰 (슬리피지 5% + 가스비 0.0005)
             current = await self._get_token_price_sol(mint, pos["decimals"])
-            sol_received = sell_raw * (current or 0) / (10 ** pos["decimals"])
+            raw_sol = sell_raw * (current or 0) / (10 ** pos["decimals"])
+            sol_received = raw_sol * 0.95 - 0.0005
+            if sol_received < 0:
+                sol_received = 0
 
-        # PnL
-        partial_entry = pos["entry_sol"] * percent / 100
-        pnl_pct = ((sol_received - partial_entry) / partial_entry * 100) if partial_entry else 0
-        self.daily_pnl += pnl_pct * (percent / 100)  # 부분 매도 비례
+        # PnL — 매도하는 토큰 비율 정확히 반영
+        original_tokens = pos.get("original_token_amount_raw", pos["token_amount_raw"])
+        sell_ratio_total = sell_raw / max(original_tokens, 1)
+        sold_entry = pos["entry_sol"] * sell_ratio_total
+        pnl_pct = ((sol_received - sold_entry) / sold_entry * 100) if sold_entry > 0 else 0
+        self.daily_pnl += pnl_pct * sell_ratio_total  # 부분 매도 비례
 
         # DB
         try:
