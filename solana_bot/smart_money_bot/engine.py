@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from solana_bot.shared import SolanaClient, JupiterSwap, HeliusClient, SafetyChecker, PumpFunSwap
+from solana_bot.shared import realistic_sim
 from solana_bot.smart_money_bot.wallets import (
     get_active_wallets,
     update_wallet_stats,
@@ -414,9 +415,17 @@ class SmartMoneyEngine:
                 logger.warning(f"  ❌ paper 매수 견적 0 — 매수 취소")
                 return
 
-            # 현실 반영: MEV sandwich (-3%) + 추가 슬리피지 (-2%) = -5%
-            # 가스비는 paper 잔고에서 차감
-            output_amount = int(raw_output * 0.95)
+            # 현실 마찰: 유동성 기반 슬리피지 + 추적자 프리미엄
+            liquidity_usd = report["details"].get("liquidity_usd", 0)
+            output_amount, total_loss = realistic_sim.apply_buy_friction(
+                raw_token_amount=raw_output,
+                liquidity_usd=liquidity_usd,
+                signal_type=opp.get("signal_type"),
+                is_smart_money_copy=True,  # 추적자 따라 매수
+            )
+            logger.info(
+                f"  💧 LP ${liquidity_usd:,.0f} → 슬리피지+프리미엄 {total_loss*100:.1f}%"
+            )
             signature = "PAPER_" + str(int(time.time()))
 
         # 포지션 등록
@@ -448,6 +457,7 @@ class SmartMoneyEngine:
             "decimals": decimals,
             "entry_price_sol": buy_amount / token_amount_ui if token_amount_ui > 0 else 0,
             "entry_time": int(time.time()),
+            "entry_liquidity_usd": report["details"].get("liquidity_usd", 0),  # 매도 시 슬리피지 계산용
             "buyers": [b["wallet"] for b in opp["buyers"]],
             "signal_type": opp["signal_type"],
             # 단계별 청산 추적 (문샷 친화적: +50/+200/+500 부분 청산)
@@ -814,13 +824,15 @@ class SmartMoneyEngine:
                 pos["sell_fail_count"] = pos.get("sell_fail_count", 0) + 1
                 return
         else:
-            # paper: 가상 매도 (현실 마찰 시뮬 추가)
+            # paper: 가상 매도 (유동성 기반 슬리피지 + 가스비)
             current_price = await self._get_token_price_sol(mint, pos["decimals"])
             raw_sol = sell_raw * (current_price or 0) / (10 ** pos["decimals"])
-            # 매도 슬리피지 5% (밈코인 평균) + 가스비 0.0005 SOL
-            sol_received = raw_sol * 0.95 - 0.0005
-            if sol_received < 0:
-                sol_received = 0
+            entry_lp = pos.get("entry_liquidity_usd", 0)
+            sol_received, slippage = realistic_sim.apply_sell_friction(
+                raw_sol_received=raw_sol,
+                liquidity_usd=entry_lp,
+            )
+            logger.debug(f"  💧 매도 슬리피지 {slippage*100:.1f}% (LP ${entry_lp:,.0f})")
 
         # PnL 계산 — 매도하는 토큰 비율 정확히 반영
         # 현재 잔량 token_amount_raw 중 sell_raw 매도

@@ -32,6 +32,9 @@ import os
 from pathlib import Path
 
 
+from solana_bot.shared import realistic_sim
+
+
 def _persistent_dir() -> Path:
     """영구 저장 디렉토리 (Railway Volume 우선)"""
     db_path = os.getenv("DB_PATH", "").strip()
@@ -445,8 +448,15 @@ class MomentumSocialEngine:
                 if not price_usd else
                 int(buy_amount * 150 / price_usd * (10 ** decimals))  # SOL ~$150
             )
-            # 현실 마찰: MEV(-3%) + 슬리피지(-2%) = -5%
-            output_amount = int(raw_output * 0.95)
+            # 현실 마찰: 유동성 기반 슬리피지 (Momentum은 추적자 없음)
+            liquidity_usd = report["details"].get("liquidity_usd", 0)
+            output_amount, total_loss = realistic_sim.apply_buy_friction(
+                raw_token_amount=raw_output,
+                liquidity_usd=liquidity_usd,
+                signal_type=None,
+                is_smart_money_copy=False,
+            )
+            logger.info(f"  💧 LP ${liquidity_usd:,.0f} → 슬리피지 {total_loss*100:.1f}%")
 
         decimals = report["details"].get("decimals", 6)
         token_amount_ui = output_amount / (10 ** decimals)
@@ -457,6 +467,7 @@ class MomentumSocialEngine:
             "entry_sol": buy_amount,
             "token_amount_raw": output_amount,
             "original_token_amount_raw": output_amount,  # 부분 매도 PnL 정확 계산용
+            "entry_liquidity_usd": report["details"].get("liquidity_usd", 0),
             "decimals": decimals,
             "entry_price_sol": buy_amount / token_amount_ui if token_amount_ui > 0 else 0,
             "entry_volume_24h": opp.get("volume_24h_usd", 0),
@@ -697,12 +708,14 @@ class MomentumSocialEngine:
                 pos["sell_fail_count"] = pos.get("sell_fail_count", 0) + 1
                 return
         else:
-            # paper: 현실 마찰 (슬리피지 5% + 가스비 0.0005)
+            # paper: 유동성 기반 슬리피지 + 가스비
             current = await self._get_token_price_sol(mint, pos["decimals"])
             raw_sol = sell_raw * (current or 0) / (10 ** pos["decimals"])
-            sol_received = raw_sol * 0.95 - 0.0005
-            if sol_received < 0:
-                sol_received = 0
+            entry_lp = pos.get("entry_liquidity_usd", 0)
+            sol_received, slippage = realistic_sim.apply_sell_friction(
+                raw_sol_received=raw_sol,
+                liquidity_usd=entry_lp,
+            )
 
         # PnL — 매도하는 토큰 비율 정확히 반영
         original_tokens = pos.get("original_token_amount_raw", pos["token_amount_raw"])
