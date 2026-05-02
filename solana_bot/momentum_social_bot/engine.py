@@ -86,7 +86,7 @@ class MomentumSocialEngine:
         self.min_market_cap = 30_000      # $30K (50K→30K, 더 일찍)
         self.max_market_cap = 5_000_000   # $5M
         self.min_mention_count = 0        # 트윗 의존 제거 (5→0, Nitter 불안정)
-        self.min_combined_score = 0.35    # 합산 점수 (0.5→0.35)
+        self.min_combined_score = 0.25    # 합산 점수 (트위터 데이터 부재 반영, 매매 빈도 우선)
 
         # 청산 — 문샷 친화 (모멘텀도 1000x 잡기)
         self.stop_loss_pct = -25

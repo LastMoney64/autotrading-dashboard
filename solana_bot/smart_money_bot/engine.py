@@ -69,7 +69,7 @@ class SmartMoneyEngine:
         self.scan_interval = 300  # 5분마다 스캔
         self.max_positions = 8    # 동시 보유 최대 8개 (0.03 × 8 = 0.24 SOL)
         self.consensus_threshold = 2  # 같은 토큰 2명 이상 매수 시 진입
-        self.high_winrate_solo = 0.55  # win_rate 55%+ 단독 시그널 OK (75→55 완화)
+        self.high_winrate_solo = 0.50  # win_rate 50%+ 단독 시그널 OK (매매 빈도 우선)
 
         # 청산 파라미터 — 문샷 친화적 (1000x까지 잡기)
         self.stop_loss_pct = -30                 # 손절 -30%
@@ -220,8 +220,9 @@ class SmartMoneyEngine:
 
         signals: dict[str, list[dict]] = {}
 
-        # Helius 한도 고려: 상위 12개 (5분마다 × 12 = 시간당 144 → 일일 3,456)
-        for w in active[:12]:
+        # 모니터링 범위 25개 (5분 × 25 = 시간당 300 → 일일 7,200, 한도 무료 100K/월 OK)
+        # 활성 지갑이 많을수록 매수 신호 더 풍부
+        for w in active[:25]:
             try:
                 buys = await self.helius.get_recent_token_buys(
                     w["address"], since_seconds=600  # 10분
