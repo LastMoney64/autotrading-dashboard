@@ -416,13 +416,14 @@ class SmartMoneyEngine:
                 logger.warning(f"  ❌ paper 매수 견적 0 — 매수 취소")
                 return
 
-            # 현실 마찰: 유동성 기반 슬리피지 + 추적자 프리미엄
+            # 현실 마찰: 유동성 기반 슬리피지 + 추적자 프리미엄 (mint 기반 재현)
             liquidity_usd = report["details"].get("liquidity_usd", 0)
             output_amount, total_loss = realistic_sim.apply_buy_friction(
                 raw_token_amount=raw_output,
                 liquidity_usd=liquidity_usd,
                 signal_type=opp.get("signal_type"),
-                is_smart_money_copy=True,  # 추적자 따라 매수
+                is_smart_money_copy=True,
+                mint=mint,  # seed 고정용
             )
             logger.info(
                 f"  💧 LP ${liquidity_usd:,.0f} → 슬리피지+프리미엄 {total_loss*100:.1f}%"
@@ -805,16 +806,39 @@ class SmartMoneyEngine:
                             f"  ⚠️ ${symbol} 매도 5회 연속 실패 → 강제 포지션 제거 "
                             f"(Token-2022 등 swap 불가 토큰 가능성)"
                         )
+                        # ★ 통계 정확성: -100% SELL을 DB에 기록 (좀비 손실 반영)
+                        try:
+                            self.db.conn.execute(
+                                """INSERT INTO smart_money_trades
+                                (timestamp, mode, side, token_mint, amount_sol, token_amount,
+                                 source_wallet, signature, pnl_pct, note)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (
+                                    datetime.now(KST).isoformat(),
+                                    self.mode, "SELL", mint, 0,
+                                    pos.get("token_amount_raw", 0) / (10 ** pos.get("decimals", 9)),
+                                    pos.get("buyers", [""])[0] if pos.get("buyers") else "",
+                                    "ZOMBIE_REMOVED", -100.0,  # 좀비 = 자본 100% 손실
+                                    f"⚠️ 좀비 강제 제거 (Token-2022 등 swap 불가)",
+                                ),
+                            )
+                            self.db.conn.commit()
+                        except Exception:
+                            pass
+                        # 자기학습: 추적 지갑 통계 업데이트 (-100% = 패배)
+                        for wallet in pos.get("buyers", []):
+                            update_wallet_stats(wallet, won=False)
                         # 포지션 완전 제거
                         self.positions.pop(mint, None)
                         self._save_positions()
                         # 텔레그램 경고
                         try:
                             await self.telegram.send(
-                                f"⚠️ <b>SmartMoney: 강제 포지션 제거</b>\n\n"
+                                f"⚠️ <b>SmartMoney: 강제 포지션 제거 (-100%)</b>\n\n"
                                 f"<b>토큰:</b> ${symbol}\n"
                                 f"<b>주소:</b> <code>{mint[:8]}...{mint[-6:]}</code>\n"
-                                f"<b>이유:</b> 매도 5회 연속 실패 (swap 불가 토큰)\n\n"
+                                f"<b>이유:</b> 매도 5회 연속 실패 (swap 불가 토큰)\n"
+                                f"<b>손실:</b> 진입 SOL 전액 (-100%)\n\n"
                                 f"<i>Phantom 지갑에서 수동 매도 권장</i>"
                             )
                         except Exception:
@@ -849,7 +873,10 @@ class SmartMoneyEngine:
         for wallet in pos.get("buyers", []):
             update_wallet_stats(wallet, won)
 
-        # DB
+        # DB — 가중치 적용 PnL 저장 (통계와 실제 잔고 일치)
+        # 부분 매도 시 pnl_pct × sell_ratio = 전체 매수 대비 기여 PnL
+        # 100% 매도면 pnl_pct 그대로
+        weighted_pnl = pnl_pct * sell_ratio_total
         try:
             self.db.conn.execute(
                 """INSERT INTO smart_money_trades
@@ -861,8 +888,8 @@ class SmartMoneyEngine:
                     self.mode, "SELL", mint, sol_received,
                     sell_raw / (10 ** pos["decimals"]),
                     pos["buyers"][0] if pos.get("buyers") else "",
-                    signature, pnl_pct,
-                    reason,
+                    signature, weighted_pnl,
+                    f"{reason} (raw_pnl={pnl_pct:+.1f}% ratio={sell_ratio_total:.0%})",
                 ),
             )
             self.db.conn.commit()

@@ -39,7 +39,7 @@ def calculate_slippage(liquidity_usd: float) -> float:
     return 0.02
 
 
-def calculate_tracker_premium(signal_type: str = None) -> float:
+def calculate_tracker_premium(signal_type: str = None, mint: str = None) -> float:
     """
     추적자 프리미엄 (SmartMoney 봇 전용)
 
@@ -47,16 +47,19 @@ def calculate_tracker_premium(signal_type: str = None) -> float:
     CONSENSUS (여러 명 동시 매수): 더 큰 프리미엄
     SOLO (1명 매수): 작은 프리미엄
 
+    mint가 주어지면 그 토큰별 일정한 프리미엄 (재현 가능, paper/live 일치성 향상)
+
     Returns: 프리미엄 비율 (0.05 = 5% 더 비싸게 매수)
     """
+    # mint 기반 seed로 재현성 확보 (같은 토큰은 항상 같은 프리미엄)
+    rng = random.Random(hash(mint)) if mint else random
+
     if signal_type == "CONSENSUS":
-        # 여러 추적자 동시 매수 = 가격 이미 빠르게 오름
-        return random.uniform(0.05, 0.15)  # 5~15%
+        return rng.uniform(0.05, 0.15)  # 5~15%
     elif signal_type == "SOLO_HIGH":
-        # 1명 매수 = 작은 프리미엄
-        return random.uniform(0.02, 0.08)  # 2~8%
+        return rng.uniform(0.02, 0.08)  # 2~8%
     else:
-        return random.uniform(0.0, 0.05)  # 0~5%
+        return rng.uniform(0.0, 0.05)  # 0~5%
 
 
 GAS_FEE_SOL = 0.0005  # 거래당 가스비 (Solana 평균)
@@ -67,6 +70,7 @@ def apply_buy_friction(
     liquidity_usd: float,
     signal_type: str = None,
     is_smart_money_copy: bool = False,
+    mint: str = None,
 ) -> tuple[int, float]:
     """
     매수 시 현실 마찰 적용
@@ -76,13 +80,14 @@ def apply_buy_friction(
         liquidity_usd: 토큰의 LP 유동성
         signal_type: "CONSENSUS" / "SOLO_HIGH" / None
         is_smart_money_copy: SmartMoney 카피인지 (추적자 프리미엄 적용)
+        mint: 토큰 주소 (seed 고정용 — 재현 가능 시뮬)
 
     Returns: (실제 받는 토큰 양, 적용된 총 손실 비율)
     """
     slippage = calculate_slippage(liquidity_usd)
 
     if is_smart_money_copy:
-        premium = calculate_tracker_premium(signal_type)
+        premium = calculate_tracker_premium(signal_type, mint=mint)
     else:
         premium = 0.0
 

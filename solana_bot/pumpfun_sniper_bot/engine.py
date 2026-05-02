@@ -769,11 +769,30 @@ class PumpFunSniperEngine:
                     logger.warning(f"  ❌ 매도 실패 — {fail_count}회 연속")
                     if fail_count >= 5:
                         logger.warning(f"  ⚠️ ${symbol} 매도 5회 실패 → 강제 제거")
+                        # ★ 통계 정확성: -100% SELL DB 기록
+                        try:
+                            self.db.conn.execute(
+                                """INSERT INTO pumpfun_trades
+                                (timestamp, mode, side, token_mint, symbol, progress_pct,
+                                 amount_sol, token_amount, pnl_pct, signature, note)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (
+                                    datetime.now(KST).isoformat(),
+                                    self.mode, "SELL", mint, symbol,
+                                    pos.get("entry_progress_pct", 0),
+                                    0, pos.get("token_amount_raw", 0) / (10 ** pos.get("decimals", 6)),
+                                    -100.0, "ZOMBIE_REMOVED",
+                                    f"⚠️ 좀비 강제 제거 (swap 불가)",
+                                ),
+                            )
+                            self.db.conn.commit()
+                        except Exception:
+                            pass
                         self.positions.pop(mint, None)
                         self._save_positions()
                         try:
                             await self.telegram.send(
-                                f"⚠️ <b>PumpFun: 강제 포지션 제거</b>\n"
+                                f"⚠️ <b>PumpFun: 강제 포지션 제거 (-100%)</b>\n"
                                 f"${symbol} 매도 5회 실패 — Phantom 수동 매도 필요"
                             )
                         except Exception:
@@ -800,7 +819,8 @@ class PumpFunSniperEngine:
         pnl_pct = ((sol_received - sold_entry) / sold_entry * 100) if sold_entry > 0 else 0
         self.daily_pnl += pnl_pct * sell_ratio_total  # 부분 매도 비례
 
-        # DB
+        # DB — 가중치 적용 PnL (전체 매수 대비 기여)
+        weighted_pnl = pnl_pct * sell_ratio_total
         try:
             self.db.conn.execute(
                 """INSERT INTO pumpfun_trades
@@ -811,7 +831,8 @@ class PumpFunSniperEngine:
                     datetime.now(KST).isoformat(),
                     self.mode, "SELL", mint, symbol, pos.get("entry_progress_pct", 0),
                     sol_received, sell_raw / (10 ** pos["decimals"]),
-                    pnl_pct, signature, reason,
+                    weighted_pnl, signature,
+                    f"{reason} (raw_pnl={pnl_pct:+.1f}% ratio={sell_ratio_total:.0%})",
                 ),
             )
             self.db.conn.commit()

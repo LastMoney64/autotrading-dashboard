@@ -694,11 +694,30 @@ class MomentumSocialEngine:
                     if fail_count >= 5:
                         symbol = pos.get("symbol", "?")
                         logger.warning(f"  ⚠️ ${symbol} 매도 5회 실패 → 강제 제거")
+                        # ★ 통계 정확성: -100% SELL DB 기록
+                        try:
+                            self.db.conn.execute(
+                                """INSERT INTO momentum_social_trades
+                                (timestamp, mode, side, token_mint, symbol, amount_sol, token_amount,
+                                 volume_change_pct, mention_count, pnl_pct, signature, note)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (
+                                    datetime.now(KST).isoformat(),
+                                    self.mode, "SELL", mint, symbol,
+                                    0, pos.get("token_amount_raw", 0) / (10 ** pos.get("decimals", 6)),
+                                    0, pos.get("entry_mentions", 0),
+                                    -100.0, "ZOMBIE_REMOVED",
+                                    f"⚠️ 좀비 강제 제거 (swap 불가)",
+                                ),
+                            )
+                            self.db.conn.commit()
+                        except Exception:
+                            pass
                         self.positions.pop(mint, None)
                         self._save_positions()
                         try:
                             await self.telegram.send(
-                                f"⚠️ <b>Momentum: 강제 포지션 제거</b>\n"
+                                f"⚠️ <b>Momentum: 강제 포지션 제거 (-100%)</b>\n"
                                 f"${symbol} 매도 5회 실패 — Phantom 수동 매도 필요"
                             )
                         except Exception:
@@ -732,7 +751,8 @@ class MomentumSocialEngine:
         else:
             self.session_stats[hour]["losses"] += 1
 
-        # DB
+        # DB — 가중치 적용 PnL
+        weighted_pnl = pnl_pct * sell_ratio_total
         try:
             self.db.conn.execute(
                 """INSERT INTO momentum_social_trades
@@ -744,7 +764,8 @@ class MomentumSocialEngine:
                     self.mode, "SELL", mint, symbol,
                     sol_received, sell_raw / (10 ** pos["decimals"]),
                     0, pos.get("entry_mentions", 0),
-                    pnl_pct, signature, reason,
+                    weighted_pnl, signature,
+                    f"{reason} (raw_pnl={pnl_pct:+.1f}% ratio={sell_ratio_total:.0%})",
                 ),
             )
             self.db.conn.commit()
